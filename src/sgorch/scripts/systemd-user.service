@@ -1,0 +1,40 @@
+[Unit]
+Description=SGOrch (SLURM-SGLang Orchestrator)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/sgorch/.venv/bin/sgorch run --config %h/sgorch/config.yaml
+Restart=always
+RestartSec=5
+
+# Environment variables
+Environment=ROUTER_TOKEN=your-router-token-here
+Environment=WORKER_HEALTH_TOKEN=your-worker-health-token-here
+
+# Working directory
+WorkingDirectory=%h/sgorch
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening (optional)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/sgorch %h/sg-logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits (optional)
+MemoryAccounting=true
+MemoryMax=1G
+TasksAccounting=true
+TasksMax=50
+
+[Install]
+WantedBy=default.target
