@@ -12,6 +12,7 @@ from .router.client import RouterClient
 from .notify.base import Notifier
 from .notify.log_only import LogOnlyNotifier
 from .metrics.prometheus import get_metrics
+from .state.file_store import FileStateStore
 
 
 logger = get_logger(__name__)
@@ -25,6 +26,9 @@ class Orchestrator:
         self.reconcilers: Dict[str, Reconciler] = {}
         self.running = False
         self.threads: List[threading.Thread] = []
+        # Initialize state store (file backend; path from config if provided)
+        file_path = getattr(self.config.orchestrator.state, 'file_path', None)
+        self.state_store = FileStateStore(file_path=file_path)
         
         # Initialize metrics server
         self._setup_metrics()
@@ -73,7 +77,8 @@ class Orchestrator:
             deployment_config=deploy_config,
             slurm=slurm,
             router_client=router_client,
-            notifier=self.notifier
+            notifier=self.notifier,
+            state_store=self.state_store
         )
     
     def _create_slurm_adapter(self, deploy_config: DeploymentConfig) -> ISlurm:

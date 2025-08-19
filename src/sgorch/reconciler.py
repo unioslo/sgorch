@@ -15,6 +15,7 @@ from .net.tunnel import SupervisedTunnelManager, TunnelSpec
 from .policy.failure import NodeBlacklist, FailureTracker, RestartPolicy
 from .discover.adopt import AdoptionManager
 from .metrics.prometheus import get_metrics
+from .state.base import StateStore, DeploymentSnapshot, SerializableWorker
 
 
 logger = get_logger(__name__)
@@ -49,12 +50,14 @@ class Reconciler:
         deployment_config: DeploymentConfig,
         slurm: ISlurm,
         router_client: RouterClient,
-        notifier: Notifier
+        notifier: Notifier,
+        state_store: StateStore
     ):
         self.config = deployment_config
         self.slurm = slurm
         self.router_client = router_client
         self.notifier = notifier
+        self.state_store = state_store
         self.logger = logger.bind(deployment=deployment_config.name)
         
         # State management
@@ -77,10 +80,51 @@ class Reconciler:
         # Metrics
         self.metrics = get_metrics()
         
+        # Load persisted state first, then adopt any existing workers
+        self._load_persisted_state()
+
         # Perform initial adoption
         self._adopt_existing_workers()
         
         self.logger.info("Reconciler initialized")
+
+    def _load_persisted_state(self) -> None:
+        """Load previously persisted state for this deployment, if any."""
+        try:
+            snapshot = self.state_store.load_deployment(self.config.name)
+            if not snapshot:
+                return
+
+            # Seed workers from snapshot
+            for sw in snapshot.workers:
+                if sw.job_id in self.workers:
+                    continue
+                worker = WorkerState(
+                    job_id=sw.job_id,
+                    instance_uuid=sw.instance_uuid,
+                    node=sw.node,
+                    remote_port=sw.remote_port,
+                    advertise_port=sw.advertise_port,
+                    worker_url=sw.worker_url,
+                    advertised_url=sw.advertised_url,
+                    health_status=HealthStatus(sw.health_status) if sw.health_status in HealthStatus._value2member_map_ else HealthStatus.UNKNOWN,
+                    last_seen=sw.last_seen,
+                    submitted_at=sw.submitted_at,
+                )
+                self.workers[worker.job_id] = worker
+
+            # Mark ports as in-use (prevents collisions on restart)
+            for p in snapshot.allocated_ports:
+                self.port_allocator.mark_in_use(p)
+
+            # Recreate health monitoring for known URLs
+            for w in list(self.workers.values()):
+                if w.worker_url and w.worker_url not in self.health_monitor.probes:
+                    self.health_monitor.add_worker(w.worker_url, self.config.health)
+
+            self.logger.info(f"Loaded persisted state: {len(snapshot.workers)} workers")
+        except Exception as e:
+            self.logger.warning(f"Failed to load persisted state: {e}")
     
     def _adopt_existing_workers(self) -> None:
         """Adopt existing workers during startup."""
@@ -152,6 +196,8 @@ class Reconciler:
             # Record successful reconciliation
             duration = time.time() - start_time
             self.metrics.record_reconcile_duration(self.config.name, duration)
+            # Persist state at end of successful cycle
+            self._persist_state()
             
         except Exception as e:
             self.logger.error(f"Error in reconciliation cycle: {e}")
@@ -506,6 +552,7 @@ class Reconciler:
         del self.workers[job_id]
         
         self.logger.info(f"Removed worker: {job_id}")
+        self._persist_state()
     
     def _update_metrics(self) -> None:
         """Update Prometheus metrics."""
@@ -539,5 +586,39 @@ class Reconciler:
         
         # Clean up tunnels
         self.tunnel_manager.shutdown()
+        # Persist final state
+        try:
+            self._persist_state()
+        except Exception:
+            pass
         
         self.logger.info("Reconciler shutdown complete")
+
+    def _persist_state(self) -> None:
+        """Persist current deployment state to the state store."""
+        try:
+            workers = []
+            for w in self.workers.values():
+                workers.append(
+                    SerializableWorker(
+                        job_id=w.job_id,
+                        instance_uuid=w.instance_uuid,
+                        node=w.node,
+                        remote_port=w.remote_port,
+                        advertise_port=w.advertise_port,
+                        worker_url=w.worker_url,
+                        advertised_url=w.advertised_url,
+                        health_status=w.health_status.value,
+                        last_seen=w.last_seen,
+                        submitted_at=w.submitted_at,
+                    )
+                )
+
+            snapshot = DeploymentSnapshot(
+                name=self.config.name,
+                workers=workers,
+                allocated_ports=sorted(list(self.port_allocator.get_allocated_ports())),
+            )
+            self.state_store.save_deployment(snapshot)
+        except Exception as e:
+            self.logger.warning(f"Failed to persist state: {e}")

@@ -28,10 +28,15 @@ class NotificationsConfig(BaseModel):
     type: Literal["log_only", "email"] = "log_only"
     email: EmailConfig = Field(default_factory=EmailConfig)
 
+class StateConfig(BaseModel):
+    backend: Literal["file"] = "file"
+    file_path: Optional[str] = None
+
 
 class OrchestratorConfig(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
+    state: StateConfig = Field(default_factory=StateConfig)
 
 
 class SSHConfig(BaseModel):
