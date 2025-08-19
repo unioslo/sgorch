@@ -1,6 +1,6 @@
 # SGOrch - SLURM ↔ SGLang Orchestrator
 
-SGOrch is a production-ready orchestrator that manages SGLang worker deployments on SLURM clusters. It automatically handles job submission, health monitoring, SSH tunneling, router registration, and failure recovery with graceful resumption capabilities.
+SGOrch is a orchestrator that manages SGLang worker deployments on SLURM clusters. It automatically handles job submission, health monitoring, SSH tunneling, router registration, and failure recovery with graceful resumption capabilities.
 
 ## Architecture Overview
 
