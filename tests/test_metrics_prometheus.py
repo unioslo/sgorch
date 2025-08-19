@@ -4,7 +4,7 @@ from sgorch.metrics.prometheus import SGOrchMetrics, get_metrics
 def test_start_http_server_respects_enabled_flag(monkeypatch):
     called = {"start": 0}
 
-    def fake_start_http_server(port, addr=""):
+    def fake_start_http_server(port, addr="", registry=None):
         called["start"] += 1
 
     monkeypatch.setattr("sgorch.metrics.prometheus.start_http_server", fake_start_http_server)

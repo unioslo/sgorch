@@ -275,8 +275,8 @@ class SGOrchMetrics:
                 return True
             
             try:
-                # Avoid passing registry to remain compatible with simple monkeypatch in tests
-                start_http_server(config.port, addr=config.bind)
+                # Pass the custom registry so SGOrch metrics are included
+                start_http_server(config.port, addr=config.bind, registry=self.registry)
                 self._http_server_port = config.port
                 
                 logger.info(f"Started Prometheus metrics server on {config.bind}:{config.port}")
