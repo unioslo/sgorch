@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, validator
-from ruamel.yaml import YAML
 
 
 class MetricsConfig(BaseModel):
@@ -144,17 +143,32 @@ def expand_env_vars(data: Any) -> Any:
 
 
 def load_config(config_path: str | Path) -> Config:
-    """Load and validate configuration from YAML file."""
+    """Load and validate configuration from YAML file.
+
+    Prefers ruamel.yaml if available; falls back to PyYAML safe_load.
+    """
     config_path = Path(config_path)
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    
-    yaml = YAML(typ="safe", pure=True)
-    with config_path.open() as f:
-        raw_data = yaml.load(f)
-    
+
+    raw_data = None
+    # Try ruamel.yaml first
+    try:
+        from ruamel.yaml import YAML  # type: ignore
+        yaml = YAML(typ="safe", pure=True)
+        with config_path.open() as f:
+            raw_data = yaml.load(f)
+    except Exception:
+        # Fallback to PyYAML safe_load
+        try:
+            import yaml as pyyaml  # type: ignore
+            with config_path.open() as f:
+                raw_data = pyyaml.safe_load(f)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load YAML config with ruamel and PyYAML: {e}")
+
     # Expand environment variables
     expanded_data = expand_env_vars(raw_data)
-    
+
     # Validate with Pydantic
     return Config(**expanded_data)

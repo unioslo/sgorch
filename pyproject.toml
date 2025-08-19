@@ -10,6 +10,7 @@ dependencies = [
     "ruamel.yaml>=0.18",
     "typer>=0.9",
     "prometheus_client>=0.20",
+    "pytest>=8.4.1",
 ]
 
 [project.scripts]

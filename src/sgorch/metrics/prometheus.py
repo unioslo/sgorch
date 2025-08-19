@@ -2,7 +2,7 @@ import time
 from typing import Dict, Optional, Set
 from threading import Lock
 
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from prometheus_client import Counter, Gauge, Histogram, start_http_server, CollectorRegistry
 
 from ..logging_setup import get_logger
 from ..config import MetricsConfig
@@ -14,128 +14,149 @@ logger = get_logger(__name__)
 class SGOrchMetrics:
     """Prometheus metrics for SGOrch."""
     
-    def __init__(self):
+    def __init__(self, registry: Optional[CollectorRegistry] = None):
+        # Use a per-instance registry to avoid global duplication across tests
+        self.registry: CollectorRegistry = registry or CollectorRegistry()
         # Deployment-level metrics
         self.workers_desired = Gauge(
             'sgorch_workers_desired',
             'Desired number of workers per deployment',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         self.workers_ready = Gauge(
             'sgorch_workers_ready',
             'Number of ready workers per deployment',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         self.workers_starting = Gauge(
             'sgorch_workers_starting',
             'Number of starting workers per deployment',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         self.workers_unhealthy = Gauge(
             'sgorch_workers_unhealthy',
             'Number of unhealthy workers per deployment',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         # Tunnel metrics
         self.tunnels_up = Gauge(
             'sgorch_tunnels_up',
             'Number of active tunnels per deployment',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         # Operation counters
         self.restarts_total = Counter(
             'sgorch_restarts_total',
             'Total number of worker restarts',
-            ['deployment', 'reason']
+            ['deployment', 'reason'],
+            registry=self.registry
         )
         
         self.jobs_submitted_total = Counter(
             'sgorch_jobs_submitted_total',
             'Total number of SLURM jobs submitted',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         self.jobs_failed_total = Counter(
             'sgorch_jobs_failed_total',
             'Total number of failed SLURM jobs',
-            ['deployment', 'reason']
+            ['deployment', 'reason'],
+            registry=self.registry
         )
         
         # Router operation metrics
         self.router_errors_total = Counter(
             'sgorch_router_errors_total',
             'Total number of router API errors',
-            ['deployment', 'operation']
+            ['deployment', 'operation'],
+            registry=self.registry
         )
         
         self.router_operations_total = Counter(
             'sgorch_router_operations_total',
             'Total number of router operations',
-            ['deployment', 'operation', 'status']
+            ['deployment', 'operation', 'status'],
+            registry=self.registry
         )
         
         # SLURM operation metrics
         self.slurm_errors_total = Counter(
             'sgorch_slurm_errors_total',
             'Total number of SLURM errors',
-            ['deployment', 'operation']
+            ['deployment', 'operation'],
+            registry=self.registry
         )
         
         self.slurm_operations_total = Counter(
             'sgorch_slurm_operations_total',
             'Total number of SLURM operations',
-            ['deployment', 'operation', 'status']
+            ['deployment', 'operation', 'status'],
+            registry=self.registry
         )
         
         # Health check metrics
         self.health_checks_total = Counter(
             'sgorch_health_checks_total',
             'Total number of health checks performed',
-            ['deployment', 'status']
+            ['deployment', 'status'],
+            registry=self.registry
         )
         
         self.health_check_duration = Histogram(
             'sgorch_health_check_duration_seconds',
             'Duration of health checks',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         # System metrics
         self.reconcile_duration = Histogram(
             'sgorch_reconcile_duration_seconds',
             'Duration of reconciliation cycles',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         self.last_successful_reconcile = Gauge(
             'sgorch_last_successful_reconcile_timestamp',
             'Timestamp of last successful reconciliation',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         # Port allocation metrics
         self.ports_allocated = Gauge(
             'sgorch_ports_allocated',
             'Number of allocated ports',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         self.ports_available = Gauge(
             'sgorch_ports_available',
             'Number of available ports',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         # Node blacklist metrics
         self.blacklisted_nodes = Gauge(
             'sgorch_blacklisted_nodes',
             'Number of blacklisted nodes',
-            ['deployment']
+            ['deployment'],
+            registry=self.registry
         )
         
         self._http_server_port: Optional[int] = None
@@ -254,6 +275,7 @@ class SGOrchMetrics:
                 return True
             
             try:
+                # Avoid passing registry to remain compatible with simple monkeypatch in tests
                 start_http_server(config.port, addr=config.bind)
                 self._http_server_port = config.port
                 

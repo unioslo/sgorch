@@ -190,6 +190,9 @@ def test_tcp_connection(host: str, port: int, timeout: int = 5) -> bool:
         logger.debug(f"TCP connection to {host}:{port} failed: {e}")
         return False
 
+# Prevent pytest from collecting this helper as a test when imported into test modules
+test_tcp_connection.__test__ = False
+
 
 def resolve_slurm_node_ip(nodename: str) -> Optional[str]:
     """

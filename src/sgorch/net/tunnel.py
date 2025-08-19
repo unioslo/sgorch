@@ -242,16 +242,15 @@ class TunnelManager:
     
     def _is_tunnel_healthy(self, tunnel: TunnelInfo) -> bool:
         """Check if a tunnel is healthy."""
-        # If we manage a process, verify it; if not (adopted), rely on TCP check below
-        if tunnel.process is not None and not self._is_process_alive(tunnel.process):
-            return False
-        
-        # For local tunnels, test the local port
+        # If we manage a process, treat a live process as healthy
+        if tunnel.process is not None:
+            return self._is_process_alive(tunnel.process)
+
+        # Adopted tunnels (no managed process): verify TCP reachability for local mode
         if tunnel.spec.mode == "local":
             return test_tcp_connection("127.0.0.1", tunnel.spec.advertise_port, timeout=2)
-        
-        # For reverse tunnels, we trust that the process being alive is sufficient
-        # (we can't easily test from this end)
+
+        # For reverse adopted tunnels, assume healthy (no local check possible)
         return True
     
     def _is_process_alive(self, process: Optional[subprocess.Popen]) -> bool:
