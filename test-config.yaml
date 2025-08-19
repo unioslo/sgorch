@@ -8,7 +8,7 @@ orchestrator:
 
 deployments:
   - name: gpt-20b
-    replicas: 1  # Start with just 1 replica for testing
+    replicas: 2
     connectivity:
       mode: tunneled
       tunnel_mode: local
@@ -34,7 +34,7 @@ deployments:
       partition: "GPUQ"
       gres: "gpu:1"
       constraint: "h100"
-      time_limit: "02:00:00"  # Shorter time for testing
+      time_limit: "02:00:00"
       cpus_per_task: 24
       mem: "128G"
       log_dir: "/cluster/home/jonalsa/sg-logs"
