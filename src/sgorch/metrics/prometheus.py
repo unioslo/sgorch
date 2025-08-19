@@ -91,6 +91,35 @@ class SGOrchMetrics:
             registry=self.registry
         )
         
+        # Router probe (OpenAI-compatible) metrics
+        self.router_probe_total = Counter(
+            'sgorch_router_probe_total',
+            'Total number of router probe attempts',
+            ['deployment', 'status'],
+            registry=self.registry
+        )
+
+        self.router_probe_latency = Histogram(
+            'sgorch_router_probe_latency_seconds',
+            'Latency of OpenAI router test probes',
+            ['deployment'],
+            registry=self.registry
+        )
+
+        self.router_probe_success = Gauge(
+            'sgorch_router_probe_success',
+            '1 if last router probe succeeded, else 0',
+            ['deployment'],
+            registry=self.registry
+        )
+
+        self.router_probe_timestamp = Gauge(
+            'sgorch_router_probe_timestamp',
+            'Timestamp of last router probe',
+            ['deployment'],
+            registry=self.registry
+        )
+        
         # SLURM operation metrics
         self.slurm_errors_total = Counter(
             'sgorch_slurm_errors_total',
@@ -211,6 +240,16 @@ class SGOrchMetrics:
                 deployment=deployment,
                 operation=operation
             ).inc()
+
+    def record_router_probe(self, deployment: str, success: bool, latency: float) -> None:
+        """Record a router OpenAI-compatible probe result."""
+        status = "success" if success else "failure"
+        self.router_probe_total.labels(deployment=deployment, status=status).inc()
+        # Only observe latency on success to avoid skew from timeouts
+        if success:
+            self.router_probe_latency.labels(deployment=deployment).observe(latency)
+        self.router_probe_success.labels(deployment=deployment).set(1.0 if success else 0.0)
+        self.router_probe_timestamp.labels(deployment=deployment).set(time.time())
     
     def record_slurm_operation(
         self,

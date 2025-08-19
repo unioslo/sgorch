@@ -27,10 +27,24 @@ class StateConfig(BaseModel):
     file_path: Optional[str] = None
 
 
+# OrchestratorConfig is defined later to include router_probe
+
+
+class RouterProbeConfig(BaseModel):
+    enabled: bool = False
+    interval_s: int = 60
+    timeout_s: int = 10
+    # Optional override; if None, use deployment.sglang.model_path
+    model: Optional[str] = None
+    # Simple prompt used for the probe
+    prompt: str = "ping"
+
+
 class OrchestratorConfig(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     state: StateConfig = Field(default_factory=StateConfig)
+    router_probe: RouterProbeConfig = Field(default_factory=RouterProbeConfig)
 
 
 class SSHConfig(BaseModel):

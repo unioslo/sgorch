@@ -13,6 +13,7 @@ from .notify.base import Notifier
 from .notify.log_only import LogOnlyNotifier
 from .metrics.prometheus import get_metrics
 from .state.file_store import FileStateStore
+from .monitor.router_probe import RouterProbeManager
 
 
 logger = get_logger(__name__)
@@ -26,6 +27,7 @@ class Orchestrator:
         self.reconcilers: Dict[str, Reconciler] = {}
         self.running = False
         self.threads: List[threading.Thread] = []
+        self.router_probe_mgr: RouterProbeManager | None = None
         # Initialize state store (file backend; path from config if provided)
         file_path = getattr(self.config.orchestrator.state, 'file_path', None)
         self.state_store = FileStateStore(file_path=file_path)
@@ -38,6 +40,9 @@ class Orchestrator:
         
         # Initialize reconcilers for each deployment
         self._setup_reconcilers()
+
+        # Initialize router probes (optional)
+        self._setup_router_probes()
         
         logger.info(f"Orchestrator initialized with {len(self.reconcilers)} deployments")
     
@@ -52,6 +57,18 @@ class Orchestrator:
         # In the future, this would create the appropriate notifier based on config
         self.notifier = LogOnlyNotifier()
         logger.info(f"Notification system initialized: {self.config.orchestrator.notifications.type}")
+
+    def _setup_router_probes(self) -> None:
+        """Initialize optional router OpenAI probe threads."""
+        rp_cfg = getattr(self.config.orchestrator, 'router_probe', None)
+        if not rp_cfg or not rp_cfg.enabled:
+            return
+        self.router_probe_mgr = RouterProbeManager(rp_cfg)
+        for deploy_config in self.config.deployments:
+            try:
+                self.router_probe_mgr.start_for(deploy_config)
+            except Exception as e:
+                logger.error(f"Failed to start router probe for {deploy_config.name}: {e}")
     
     def _setup_reconcilers(self) -> None:
         """Initialize reconcilers for each deployment."""
@@ -217,6 +234,13 @@ class Orchestrator:
                 reconciler.shutdown()
             except Exception as e:
                 logger.error(f"Error shutting down reconciler {name}: {e}")
+
+        # Stop router probe threads
+        if self.router_probe_mgr:
+            try:
+                self.router_probe_mgr.stop_all()
+            except Exception as e:
+                logger.error(f"Error stopping router probe manager: {e}")
         
         # Wait for threads to finish
         for thread in self.threads:

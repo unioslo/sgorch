@@ -3,6 +3,12 @@ orchestrator:
     enabled: true
     bind: "0.0.0.0"
     port: 9315
+  router_probe:
+    enabled: false       # Set true to enable OpenAI probe to router
+    interval_s: 60       # Probe interval
+    timeout_s: 10        # Per-request timeout
+    # model: "gpt-oss-20b" # Optional override; defaults to sglang.model_path
+    prompt: "ping"
   notifications:
     type: log_only           # future: email
     email:                   # for future
