@@ -480,22 +480,43 @@ class Reconciler:
                 # Deregister stale workers (in router but not in our healthy set)
                 our_healthy_urls = {w.advertised_url for w in healthy_workers}
                 stale_urls = router_workers - our_healthy_urls
-                
+
                 for url in stale_urls:
-                    # Only deregister if it matches our deployment pattern
-                    if self.config.name in url or any(self.config.name in w.advertised_url or "" 
-                                                    for w in self.workers.values() if w.advertised_url):
-                        try:
-                            self.router_client.remove(url)
-                            self.logger.info(f"Deregistered stale worker: {url}")
-                            self.metrics.record_router_operation(
-                                self.config.name, "remove", True
-                            )
-                        except Exception as e:
-                            self.logger.error(f"Failed to deregister worker: {e}")
-                            self.metrics.record_router_operation(
-                                self.config.name, "remove", False
-                            )
+                    # Be conservative: only deregister URLs that look like ours
+                    should_remove = False
+                    try:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(url)
+                        host = parsed.hostname
+                        port = parsed.port
+                    except Exception:
+                        host, port = None, None
+
+                    if self.config.connectivity.mode == "tunneled":
+                        adv_host = self.config.connectivity.advertise_host
+                        pr_min, pr_max = self.config.connectivity.local_port_range
+                        if host in {adv_host, "127.0.0.1", "localhost"} and port and pr_min <= port <= pr_max:
+                            should_remove = True
+                    else:
+                        # In direct mode, only remove if it's one of our known URLs
+                        known_urls = {w.advertised_url for w in self.workers.values() if w.advertised_url}
+                        if url in known_urls:
+                            should_remove = True
+
+                    if not should_remove:
+                        continue
+
+                    try:
+                        self.router_client.remove(url)
+                        self.logger.info(f"Deregistered stale worker: {url}")
+                        self.metrics.record_router_operation(
+                            self.config.name, "remove", True
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Failed to deregister worker: {e}")
+                        self.metrics.record_router_operation(
+                            self.config.name, "remove", False
+                        )
         
         except Exception as e:
             self.logger.error(f"Error reconciling router state: {e}")
@@ -533,11 +554,20 @@ class Reconciler:
         worker = self.workers.get(job_id)
         if not worker:
             return
-        
+
+        # Proactively deregister from router if we had advertised a URL
+        if worker.advertised_url:
+            try:
+                self.router_client.remove(worker.advertised_url)
+                self.logger.info(f"Deregistered worker from router: {worker.advertised_url}")
+            except Exception as e:
+                # Don't block cleanup if router removal fails
+                self.logger.warning(f"Failed to deregister worker from router: {e}")
+
         # Clean up health monitoring
         if worker.worker_url:
             self.health_monitor.remove_worker(worker.worker_url)
-        
+
         # Clean up tunnels
         tunnel_key = f"{self.config.name}:{job_id}"
         self.tunnel_manager.drop(tunnel_key)

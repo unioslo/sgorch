@@ -274,14 +274,33 @@ class AdoptionManager:
             
             # Find router workers that don't correspond to adopted workers
             stale_workers = router_workers - adopted_urls
-            
-            if stale_workers:
-                self.logger.warning(
-                    f"Found {len(stale_workers)} stale workers in router"
-                )
-                
-                # Remove stale workers
+
+            # Be conservative: only touch URLs that look like ours (advertise host + port range)
+            safe_to_remove: Set[str] = set()
+            try:
+                from urllib.parse import urlparse
+                adv_host = self.config.connectivity.advertise_host
+                pr_min, pr_max = self.config.connectivity.local_port_range
                 for worker_url in stale_workers:
+                    try:
+                        parsed = urlparse(worker_url)
+                        host = parsed.hostname
+                        port = parsed.port
+                    except Exception:
+                        host, port = None, None
+                    if host in {adv_host, "127.0.0.1", "localhost"} and port and pr_min <= port <= pr_max:
+                        safe_to_remove.add(worker_url)
+            except Exception:
+                # If parsing fails, err on the side of not removing anything
+                safe_to_remove = set()
+
+            if safe_to_remove:
+                self.logger.warning(
+                    f"Found {len(safe_to_remove)} stale workers in router scoped to this deployment"
+                )
+
+                # Remove stale workers considered ours
+                for worker_url in safe_to_remove:
                     try:
                         self.router_client.remove(worker_url)
                         self.logger.info(f"Removed stale worker from router: {worker_url}")
