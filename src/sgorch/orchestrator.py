@@ -71,6 +71,28 @@ class Orchestrator:
         
         # Create router client
         router_client = RouterClient(deploy_config.router)
+
+        # Optional: fast-fail if router is unreachable/misconfigured
+        try:
+            if not router_client.health_check():
+                base = deploy_config.router.base_url
+                list_ep = deploy_config.router.endpoints.list
+                add_ep = deploy_config.router.endpoints.add
+                rm_ep = deploy_config.router.endpoints.remove
+                auth = deploy_config.router.auth
+                hint = ""
+                if auth and auth.type == "header":
+                    import os
+                    token_env = auth.header_value_env
+                    if not os.getenv(token_env):
+                        hint = f" (missing env {token_env})"
+                raise RuntimeError(
+                    f"Router liveness check failed for {base}. Verify endpoints: list={list_ep} add={add_ep} remove={rm_ep}{hint}"
+                )
+        except Exception as e:
+            logger.error(f"Router check failed for deployment {deploy_config.name}: {e}")
+            # Fail fast to surface misconfiguration early
+            raise
         
         # Create reconciler
         return Reconciler(
