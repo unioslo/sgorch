@@ -5,49 +5,51 @@ from .base import JobInfo, JobState
 
 
 def parse_squeue_output(output: str) -> List[JobInfo]:
-    """Parse squeue output into JobInfo objects."""
-    jobs = []
-    lines = output.strip().split('\n')
-    
-    if len(lines) < 2:  # No header or data
+    """Parse squeue output into JobInfo objects.
+
+    Supports both header and headerless output, and works with the
+    custom --format used by SlurmCliAdapter:
+      '%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R'
+    """
+    jobs: List[JobInfo] = []
+    lines = [ln for ln in output.strip().split('\n') if ln.strip()]
+
+    if not lines:
         return jobs
-    
-    # Skip header line
-    for line in lines[1:]:
-        if not line.strip():
-            continue
-            
-        # Expected format: JOBID PARTITION NAME USER ST TIME NODES NODELIST(REASON)
-        # Using delimiter approach since columns can have spaces
+
+    # Detect whether the first line is a header: if it starts with non-digits
+    # (e.g., "JOBID"), treat it as a header and skip it; otherwise, parse all lines.
+    first_parts = lines[0].split()
+    first_token = first_parts[0] if first_parts else ''
+    has_header = not first_token.isdigit()
+    start_idx = 1 if has_header else 0
+
+    for line in lines[start_idx:]:
         parts = line.split()
-        
         if len(parts) < 6:
             continue
-        
+
+        # Expected columns with our --format:
+        # 0: JOBID, 1: PARTITION, 2: NAME, 3: USER, 4: ST, 5: TIME, 6: NODES, 7: NODELIST(REASON)
         job_id = parts[0]
-        
-        # Parse state - ST column
         state_str = parts[4]
         state = _parse_job_state(state_str)
-        
-        # Extract node information
+
         node = None
         if len(parts) >= 8:
             nodelist = parts[7]
             if not nodelist.startswith('('):  # Not a reason in parentheses
-                # Extract first node from nodelist
                 node = _extract_first_node(nodelist)
-        
-        # Time left parsing from TIME column (parts[5])
+
         time_left_s = _parse_time_remaining(parts[5])
-        
+
         jobs.append(JobInfo(
             job_id=job_id,
             state=state,
             node=node,
             time_left_s=time_left_s
         ))
-    
+
     return jobs
 
 
