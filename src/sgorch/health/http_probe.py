@@ -66,7 +66,7 @@ class HealthProbe:
         """Perform a single health check probe."""
         self.last_probe_time = time.time()
         
-        logger.debug(f"Health check for {self.worker_url}")
+        logger.info(f"Health check attempt {self.consecutive_failures + 1} for {self.worker_url}")
         
         try:
             start_time = time.time()
@@ -84,38 +84,64 @@ class HealthProbe:
             result = self._evaluate_response(response, response_time_ms)
             
             # Update state
+            old_status = self.current_status
             self._update_state(result)
+            
+            # Log result
+            if result.status == HealthStatus.HEALTHY:
+                logger.info(f"Health check SUCCESS for {self.worker_url}: {result.status_code} in {response_time_ms:.1f}ms")
+            else:
+                logger.warning(f"Health check FAILED for {self.worker_url}: {result.status_code} - {result.error}")
+            
+            # Log status changes
+            if old_status != self.current_status:
+                logger.info(f"Worker {self.worker_url} status: {old_status} -> {self.current_status} (successes: {self.consecutive_successes}, failures: {self.consecutive_failures})")
             
             return result
             
         except httpx.TimeoutException:
-            error_msg = f"Health check timeout for {self.worker_url}"
-            logger.debug(error_msg)
+            error_msg = f"Health check timeout after {self.config.timeout_s}s"
+            logger.warning(f"Health check TIMEOUT for {self.worker_url}: {error_msg}")
             result = HealthResult(
                 status=HealthStatus.UNHEALTHY,
                 error=error_msg
             )
+            old_status = self.current_status
             self._update_state(result)
+            
+            if old_status != self.current_status:
+                logger.info(f"Worker {self.worker_url} status: {old_status} -> {self.current_status} (failures: {self.consecutive_failures})")
+            
             return result
             
         except httpx.ConnectError:
-            error_msg = f"Connection failed to {self.worker_url}"
-            logger.debug(error_msg)
+            error_msg = f"Connection refused - SGLang likely still starting"
+            logger.info(f"Health check CONNECTION FAILED for {self.worker_url}: {error_msg}")
             result = HealthResult(
                 status=HealthStatus.UNHEALTHY,
                 error=error_msg
             )
+            old_status = self.current_status
             self._update_state(result)
+            
+            if old_status != self.current_status:
+                logger.info(f"Worker {self.worker_url} status: {old_status} -> {self.current_status} (failures: {self.consecutive_failures})")
+            
             return result
             
         except Exception as e:
-            error_msg = f"Health check error for {self.worker_url}: {e}"
-            logger.debug(error_msg)
+            error_msg = f"Health check error: {e}"
+            logger.warning(f"Health check ERROR for {self.worker_url}: {error_msg}")
             result = HealthResult(
                 status=HealthStatus.UNHEALTHY,
                 error=error_msg
             )
+            old_status = self.current_status
             self._update_state(result)
+            
+            if old_status != self.current_status:
+                logger.info(f"Worker {self.worker_url} status: {old_status} -> {self.current_status} (failures: {self.consecutive_failures})")
+            
             return result
     
     def _evaluate_response(self, response: httpx.Response, response_time_ms: float) -> HealthResult:

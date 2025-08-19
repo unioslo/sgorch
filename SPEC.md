@@ -4,7 +4,7 @@
 
 * Runs as a **user-level systemd service** on a VM inside the SLURM cluster.
 * Manages **multiple deployments** (each = model + router + slurm profile).
-* Launches SGLang workers as **SLURM jobs**, maintains **SSH tunnels** so the router can reach each worker, registers/deregisters with router, and health-checks workers (SLURM + `/v1/health` with **auth**).
+* Launches SGLang workers as **SLURM jobs**, maintains **SSH tunnels** so the router can reach each worker, registers/deregisters with router, and health-checks workers (SLURM + `/health` with **auth**).
 * Uses **slurmrestd** if available; otherwise falls back to CLI. The SLURM layer is an **interface** so it’s swappable later.
 * **Stateless** by design, but must **resume gracefully** by discovering current jobs, logs, and router workers.
 * Initial scaling is **fixed** per deployment (e.g., `replicas=2`), but architecture allows future dynamic scaling.
@@ -29,7 +29,7 @@
 ### Core flows
 
 1. **Submit**: choose port(s), craft sbatch script, submit.
-2. **Discover**: when job RUNNING, detect node & remote port, start SSH tunnel, probe `/v1/health`.
+2. **Discover**: when job RUNNING, detect node & remote port, start SSH tunnel, probe `/health`.
 3. **Register**: after `k` healthy probes, `router.add(worker_url)` (the **router-reachable** URL, often via tunnel).
 4. **Monitor**: continuous probes; on consecutive failures or SLURM errors → **drain** (router.remove), cancel job, replace.
 5. **Walltime**: pre-drain and resubmit before SLURM time limit expires.
@@ -257,7 +257,7 @@ deployments:
         - "8192"
 
     health:
-      path: "/v1/health"
+      path: "/health"
       interval_s: 5
       timeout_s: 3
       consecutive_ok_for_ready: 2

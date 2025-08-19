@@ -89,7 +89,7 @@ class SGLangConfig(BaseModel):
 
 
 class HealthConfig(BaseModel):
-    path: str = "/v1/health"
+    path: str = "/health"
     interval_s: int = 5
     timeout_s: int = 3
     consecutive_ok_for_ready: int = 2

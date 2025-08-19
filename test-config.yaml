@@ -1,0 +1,75 @@
+orchestrator:
+  metrics:
+    enabled: true
+    bind: "0.0.0.0"
+    port: 9315
+  notifications:
+    type: log_only
+
+deployments:
+  - name: gpt-20b
+    replicas: 1  # Start with just 1 replica for testing
+    connectivity:
+      mode: tunneled
+      tunnel_mode: local
+      orchestrator_host: "127.0.0.1"
+      advertise_host: "127.0.0.1"
+      local_port_range: [30001, 30099]  # Avoid conflict with router on 30000
+      ssh:
+        user: "jonalsa"
+        opts: ["-o", "ServerAliveInterval=15", "-o", "ExitOnForwardFailure=yes"]
+
+    router:
+      base_url: "http://127.0.0.1:30000"
+      endpoints:
+        list: "/list_workers"  # SGLang router endpoint
+        add: "/add_worker"     # SGLang router endpoint
+        remove: "/remove_worker"  # SGLang router endpoint
+      # No auth needed for testing
+
+    slurm:
+      prefer: auto
+      account: "chatgpt"
+      reservation: "gpt"
+      partition: "GPUQ"
+      gres: "gpu:1"
+      constraint: "h100"
+      time_limit: "02:00:00"  # Shorter time for testing
+      cpus_per_task: 24
+      mem: "128G"
+      log_dir: "/cluster/home/jonalsa/sg-logs"
+      env:
+        HF_HOME: "/cluster/home/jonalsa/.cache/huggingface"
+        HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
+
+    sglang:
+      model_path: "openai/gpt-oss-20b"
+      venv_path: "/cluster/home/jonalsa/sglang-test/.venv"
+      args:
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "{PORT}"
+        - "--reasoning-parser"
+        - "gpt-oss"
+        - "--context-length"
+        - "32000"  # Smaller for testing
+        - "--mem-fraction-static"
+        - "0.8"
+        - "--tp"
+        - "1"
+
+    health:
+      path: "/health"
+      interval_s: 5
+      timeout_s: 10
+      consecutive_ok_for_ready: 2
+      failures_to_unhealthy: 30  # Allow many failed attempts during startup
+      # No auth headers needed for testing
+
+    policy:
+      restart_backoff_s: 60
+      deregister_grace_s: 10
+      start_grace_period_s: 900  # Give 15 minutes for startup
+      predrain_seconds_before_walltime: 180
+      node_blacklist_cooldown_s: 600

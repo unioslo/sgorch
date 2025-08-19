@@ -142,7 +142,7 @@ deployments:
         - "64000"
 
     health:
-      path: "/v1/health"
+      path: "/health"
       interval_s: 5
       timeout_s: 3
       consecutive_ok_for_ready: 2
@@ -363,7 +363,7 @@ sbatch --test-only test-script.sh
 curl -H "Authorization: $ROUTER_TOKEN" http://router:8080/workers/list
 
 # Test worker health
-curl -H "Authorization: $WORKER_HEALTH_TOKEN" http://worker:8000/v1/health
+curl -H "Authorization: $WORKER_HEALTH_TOKEN" http://worker:8000/health
 
 # Test SSH connectivity
 ssh compute-node hostname

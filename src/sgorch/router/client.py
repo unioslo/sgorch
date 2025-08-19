@@ -87,47 +87,10 @@ class RouterClient:
         logger.info(f"Adding worker to router: {worker_url}")
         
         try:
-            endpoint = self.config.endpoints.add
-            
-            # Try different payload formats that routers commonly accept
-            payloads_to_try = [
-                {"url": worker_url},
-                {"worker": worker_url},
-                {"endpoint": worker_url},
-                {"worker_url": worker_url},
-                worker_url,  # Some routers accept plain strings
-            ]
-            
-            last_error = None
-            
-            for payload in payloads_to_try:
-                try:
-                    if isinstance(payload, str):
-                        # For string payloads, try both JSON and form data
-                        response = self.client.post(endpoint, json=payload)
-                        if response.status_code >= 400:
-                            response = self.client.post(endpoint, data={"url": payload})
-                    else:
-                        response = self.client.post(endpoint, json=payload)
-                    
-                    response.raise_for_status()
-                    
-                    # Success
-                    logger.info(f"Successfully added worker: {worker_url}")
-                    return
-                    
-                except httpx.HTTPStatusError as e:
-                    last_error = e
-                    if e.response.status_code == 400:
-                        # Bad request, try next payload format
-                        continue
-                    else:
-                        # Other HTTP errors, re-raise immediately
-                        raise
-            
-            # If we get here, all payload formats failed
-            if last_error:
-                raise last_error
+            # SGLang router format: POST /add_worker?url=<worker_url>
+            response = self.client.post(self.config.endpoints.add, params={"url": worker_url})
+            response.raise_for_status()
+            logger.info(f"Successfully added worker: {worker_url}")
                 
         except httpx.HTTPStatusError as e:
             error_msg = f"HTTP error adding worker: {e.response.status_code} {e.response.text}"
@@ -142,46 +105,15 @@ class RouterClient:
         logger.info(f"Removing worker from router: {worker_url}")
         
         try:
-            endpoint = self.config.endpoints.remove
+            # SGLang router format: POST /remove_worker?url=<worker_url>
+            response = self.client.post(self.config.endpoints.remove, params={"url": worker_url})
             
-            # Try different approaches for removing workers
-            # Method 1: DELETE with URL in path
-            try:
-                # Some routers expect URL-encoded worker URL in path
-                import urllib.parse
-                encoded_url = urllib.parse.quote(worker_url, safe='')
-                delete_endpoint = f"{endpoint}/{encoded_url}"
-                response = self.client.delete(delete_endpoint)
-                
-                if response.status_code not in [404, 405]:  # Not method not allowed or not found
-                    response.raise_for_status()
-                    logger.info(f"Successfully removed worker: {worker_url}")
-                    return
-            except httpx.HTTPStatusError:
-                pass  # Try next method
-            
-            # Method 2: DELETE with JSON body
-            try:
-                response = self.client.delete(endpoint, json={"url": worker_url})
-                if response.status_code not in [404, 405]:
-                    response.raise_for_status()
-                    logger.info(f"Successfully removed worker: {worker_url}")
-                    return
-            except httpx.HTTPStatusError:
-                pass  # Try next method
-            
-            # Method 3: POST to remove endpoint
-            try:
-                response = self.client.post(endpoint, json={"url": worker_url})
-                response.raise_for_status()
-                logger.info(f"Successfully removed worker: {worker_url}")
+            if response.status_code == 404:
+                logger.info(f"Worker not found in router (already removed): {worker_url}")
                 return
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
-                    # Worker not found is OK
-                    logger.info(f"Worker not found in router (already removed): {worker_url}")
-                    return
-                raise
+                
+            response.raise_for_status()
+            logger.info(f"Successfully removed worker: {worker_url}")
                 
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:

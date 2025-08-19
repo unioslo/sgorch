@@ -19,7 +19,7 @@ def render_sbatch_script(
     model_path: str = "",
     remote_port: int = 8000,
     sglang_args: Optional[list[str]] = None,
-    health_path: str = "/v1/health",
+    health_path: str = "/health",
     health_token_env: str = "WORKER_HEALTH_TOKEN",
     sglang_venv_path: Optional[str] = None,
     sbatch_extra: Optional[list[str]] = None,
@@ -64,20 +64,24 @@ def render_sbatch_script(
     
     script_lines.extend([
         "",
-        "set -euo pipefail",
+        "set -eo pipefail",  # Remove -u flag to allow unbound variables
     ])
     
     # Environment variables
     for key, value in env_vars.items():
         script_lines.append(f"export {key}={value}")
     
+    # Add health token if available
+    script_lines.append(f"export {health_token_env}=${{{health_token_env}:-}}")
     script_lines.append(f"PORT={remote_port}")
     script_lines.append("")
     
     # Activation logic
     script_lines.extend([
-        "# Activate environment",
+        "# Activate environment", 
+        "set +u",  # Temporarily disable unbound variable check
         "source ~/.bashrc || true",
+        "set -u",  # Re-enable unbound variable check
     ])
     
     if sglang_venv_path:
@@ -101,9 +105,9 @@ def render_sbatch_script(
     processed_args = []
     for arg in sglang_args:
         if arg == "{PORT}":
-            processed_args.append(f"${remote_port}")
+            processed_args.append("$PORT")
         else:
-            processed_args.append(arg.replace("{PORT}", str(remote_port)))
+            processed_args.append(arg.replace("{PORT}", "$PORT"))
     sglang_cmd.extend(processed_args)
     
     # Add default host and port if not in args
@@ -113,16 +117,27 @@ def render_sbatch_script(
         sglang_cmd.extend(["--port", f"{remote_port}"])
     
     # Launch sglang server
+    server_log = f"{log_dir}/sglang_{deploy_name}_$SLURM_JOB_ID.log"
     script_lines.extend([
+        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting SGLang server on $HOSTNAME:$PORT...\"",
+        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Command: {' '.join(sglang_cmd)}\" | tee {server_log}",
+        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Logs: {server_log}\"",
+        "",
         " \\\n  ".join(sglang_cmd) + " \\",
-        f"  > {log_dir}/server_$SLURM_JOB_ID.log 2>&1 &",
+        f"  >> {server_log} 2>&1 &",
         "",
         "PID=$!",
+        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] SGLang server started with PID $PID\"",
+        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Monitor logs: tail -f {server_log}\"",
         "",
         "# Emit a single-line READY marker for adoption on restart:",
         "for i in {1..180}; do",
-        f'  if curl -fsS -H "Authorization: ${{{health_token_env}}}" \\',
-        f'      "http://$IP:{remote_port}{health_path}" >/dev/null; then',
+        f'  if [ -n "${{{health_token_env}:-}}" ]; then',
+        f'    CURL_CMD="curl -fsS -H \\"Authorization: ${{{health_token_env}}}\\" \\"http://$IP:{remote_port}{health_path}\\""',
+        "  else",
+        f'    CURL_CMD="curl -fsS \\"http://$IP:{remote_port}{health_path}\\""',
+        "  fi",
+        '  if eval $CURL_CMD >/dev/null 2>&1; then',
         f'    echo "READY URL=http://$IP:{remote_port} JOB=$SLURM_JOB_ID INSTANCE={instance_uuid}"',
         "    break",
         "  fi",

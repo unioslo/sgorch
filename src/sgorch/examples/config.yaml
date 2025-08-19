@@ -17,8 +17,8 @@ deployments:
       # Either "direct" or "tunneled". If tunneled, choose local or reverse.
       mode: tunneled
       tunnel_mode: local              # local: ssh -L (VM→node); reverse: ssh -R (node→VM)
-      orchestrator_host: "router-vm.internal"  # VM hostname (for reverse tunnels)
-      advertise_host: "router-vm.internal"     # what router will advertise to clients
+      orchestrator_host: "127.0.0.1"  # VM hostname (for reverse tunnels)
+      advertise_host: "127.0.0.1"     # what router will advertise to clients
       local_port_range: [30000, 30999]        # for -L or -R port allocation
       ssh:
         user: "jonalsa"
@@ -26,7 +26,7 @@ deployments:
         # optional: ProxyJump, IdentityFile, etc.
 
     router:
-      base_url: "http://router-vm.internal:8080"
+      base_url: "http://127.0.0.1:30000"
       endpoints:
         list: "/workers/list"
         add: "/workers/add"
@@ -72,7 +72,7 @@ deployments:
         - "1"
 
     health:
-      path: "/v1/health"
+      path: "/health"
       interval_s: 5
       timeout_s: 3
       consecutive_ok_for_ready: 2
@@ -98,7 +98,7 @@ deployments:
       local_port_range: [31000, 31999]
 
     router:
-      base_url: "http://router-vm.internal:8080"
+      base_url: "http://127.0.0.1:30000"
       auth:
         type: header
         header_name: "Authorization"
@@ -138,9 +138,9 @@ deployments:
         - "1"
 
     health:
-      path: "/v1/health"
-      interval_s: 10  # Less frequent health checks
-      timeout_s: 10   # Longer timeout
+      path: "/health"
+      interval_s: 10
+      timeout_s: 10
       consecutive_ok_for_ready: 3
       failures_to_unhealthy: 2
       headers:

@@ -170,6 +170,7 @@ class Reconciler:
                 # Update from SLURM info
                 if slurm_job.state == "RUNNING" and not worker.node:
                     worker.node = slurm_job.node
+                    self.logger.info(f"Worker {worker.job_id} started running on {worker.node}")
                 
                 # Check for failures
                 if slurm_job.state in ("FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL"):
@@ -183,12 +184,27 @@ class Reconciler:
                     # Remove failed worker
                     self._remove_worker(worker.job_id)
             else:
-                # Job no longer exists in SLURM
-                self.logger.warning(f"Worker {worker.job_id} no longer exists in SLURM")
+                # Job no longer exists in SLURM - but check if enough time has passed
+                # to avoid timing issues where jobs haven't appeared in squeue yet
+                time_since_submit = time.time() - worker.submitted_at
+                grace_period = 60  # 60 seconds grace period
+                
+                if time_since_submit < grace_period:
+                    # Too early to declare job missing - it might still be starting
+                    self.logger.debug(f"Worker {worker.job_id} not found in SLURM, but within grace period ({time_since_submit:.1f}s < {grace_period}s)")
+                    continue
+                
+                # Enough time has passed - job is genuinely missing
+                self.logger.warning(f"Worker {worker.job_id} no longer exists in SLURM after {time_since_submit:.1f}s")
                 self._remove_worker(worker.job_id)
     
     def _check_worker_health(self) -> None:
         """Perform health checks on workers."""
+        # Only perform health checks if we have workers with URLs
+        workers_with_urls = [w for w in self.workers.values() if w.worker_url]
+        if not workers_with_urls:
+            return
+            
         health_results = self.health_monitor.probe_all_due()
         
         for worker_url, result in health_results.items():
@@ -200,7 +216,15 @@ class Reconciler:
             # Update health status
             probe = self.health_monitor.probes.get(worker_url)
             if probe:
+                old_status = worker.health_status
                 worker.health_status = probe.get_status()
+                
+                # Log status changes
+                if old_status != worker.health_status:
+                    self.logger.info(
+                        f"Worker {worker.job_id} health changed: {old_status} -> {worker.health_status}",
+                        worker_url=worker.worker_url
+                    )
                 
                 if result.status == HealthStatus.HEALTHY:
                     worker.last_seen = time.time()
@@ -270,7 +294,11 @@ class Reconciler:
             
             self.workers[job_id] = worker
             
+            # Log where to find the SGLang server logs
+            sglang_log_path = f"{self.config.slurm.log_dir}/sglang_{self.config.name}_{job_id}.log"
             self.logger.info(f"Started worker: job_id={job_id}, uuid={instance_uuid}")
+            self.logger.info(f"SGLang server logs: {sglang_log_path}")
+            self.logger.info(f"Monitor SGLang startup: tail -f {sglang_log_path}")
             self.metrics.record_job_submitted(self.config.name)
             
         except Exception as e:
@@ -329,6 +357,16 @@ class Reconciler:
     def _manage_tunnels(self) -> None:
         """Manage SSH tunnels for workers."""
         if self.config.connectivity.mode != "tunneled":
+            # For direct mode, set worker URLs directly
+            for worker in self.workers.values():
+                if worker.node and worker.remote_port and not worker.worker_url:
+                    worker.worker_url = f"http://{worker.node}:{worker.remote_port}"
+                    worker.advertised_url = worker.worker_url
+                    
+                    # Start health monitoring for new workers
+                    if worker.worker_url not in self.health_monitor.probes:
+                        self.health_monitor.add_worker(worker.worker_url, self.config.health)
+                        self.logger.info(f"Started health monitoring for worker: {worker.worker_url}")
             return
         
         for worker in self.workers.values():
@@ -351,16 +389,35 @@ class Reconciler:
             tunnel_key = f"{self.config.name}:{worker.job_id}"
             advertised_url = self.tunnel_manager.ensure(tunnel_key, tunnel_spec)
             worker.advertised_url = advertised_url
+            
+            # Set worker URL for health monitoring (tunnel endpoint)
+            if not worker.worker_url and advertised_url:
+                worker.worker_url = advertised_url
+                
+                # Start health monitoring for new workers
+                if worker.worker_url not in self.health_monitor.probes:
+                    self.health_monitor.add_worker(worker.worker_url, self.config.health)
+                    self.logger.info(f"Started health monitoring for worker: {worker.worker_url}")
     
     def _reconcile_router(self) -> None:
         """Reconcile router registrations."""
-        try:
-            # Get current router workers
-            router_workers = self.router_client.list()
+        # Collect workers that should be registered (healthy with advertised URLs)
+        healthy_workers = [w for w in self.workers.values() 
+                          if w.is_healthy() and w.advertised_url]
+        
+        # If we have no healthy workers and no workers to potentially deregister, skip router operations
+        if not healthy_workers and not self.workers:
+            return
             
-            # Register healthy workers
-            for worker in self.workers.values():
-                if worker.is_healthy() and worker.advertised_url:
+        try:
+            # Only call list() if we have workers to potentially register/deregister
+            need_router_check = bool(healthy_workers)
+            
+            if need_router_check:
+                router_workers = self.router_client.list()
+                
+                # Register healthy workers that aren't registered yet
+                for worker in healthy_workers:
                     if worker.advertised_url not in router_workers:
                         try:
                             self.router_client.add(worker.advertised_url)
@@ -373,23 +430,26 @@ class Reconciler:
                             self.metrics.record_router_operation(
                                 self.config.name, "add", False
                             )
-            
-            # Deregister unhealthy workers
-            our_urls = {w.advertised_url for w in self.workers.values() if w.advertised_url}
-            stale_urls = router_workers - our_urls
-            
-            for url in stale_urls:
-                try:
-                    self.router_client.remove(url)
-                    self.logger.info(f"Deregistered stale worker: {url}")
-                    self.metrics.record_router_operation(
-                        self.config.name, "remove", True
-                    )
-                except Exception as e:
-                    self.logger.error(f"Failed to deregister worker: {e}")
-                    self.metrics.record_router_operation(
-                        self.config.name, "remove", False
-                    )
+                
+                # Deregister stale workers (in router but not in our healthy set)
+                our_healthy_urls = {w.advertised_url for w in healthy_workers}
+                stale_urls = router_workers - our_healthy_urls
+                
+                for url in stale_urls:
+                    # Only deregister if it matches our deployment pattern
+                    if self.config.name in url or any(self.config.name in w.advertised_url or "" 
+                                                    for w in self.workers.values() if w.advertised_url):
+                        try:
+                            self.router_client.remove(url)
+                            self.logger.info(f"Deregistered stale worker: {url}")
+                            self.metrics.record_router_operation(
+                                self.config.name, "remove", True
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Failed to deregister worker: {e}")
+                            self.metrics.record_router_operation(
+                                self.config.name, "remove", False
+                            )
         
         except Exception as e:
             self.logger.error(f"Error reconciling router state: {e}")

@@ -157,10 +157,12 @@ class SlurmCliAdapter(ISlurm):
         logger.debug(f"Listing jobs with prefix: {name_prefix}")
         
         # Use squeue to get jobs for current user with name filter
+        import os
+        current_user = os.getenv('USER', os.getenv('USERNAME', 'ME'))
+        
         cmd = [
             'squeue',
-            '--user', 'ME',  # Current user only
-            '--name', f'{name_prefix}*',
+            '--user', current_user,
             '--format', '%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R',
             '--noheader'
         ]
@@ -177,9 +179,11 @@ class SlurmCliAdapter(ISlurm):
                 logger.error(f"squeue failed: {result.stderr}")
                 return []
             
-            jobs = parse_squeue_output(result.stdout)
-            logger.debug(f"Found {len(jobs)} jobs with prefix {name_prefix}")
-            return jobs
+            all_jobs = parse_squeue_output(result.stdout)
+            # TODO: Implement proper name filtering - for now return all jobs
+            # The reconciler will filter by job_id patterns
+            logger.debug(f"Found {len(all_jobs)} total jobs (name filtering not implemented)")
+            return all_jobs
             
         except subprocess.TimeoutExpired:
             logger.error(f"squeue command timed out")
