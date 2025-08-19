@@ -49,13 +49,16 @@ class HealthProbe:
         # HTTP client with timeout
         self.client = httpx.Client(timeout=config.timeout_s)
         
-        # Backoff for failed requests
+        # Backoff for failed requests influences probing cadence during startup/failure
+        # Use a base delay slower than the steady-state interval to reduce noise.
         self.backoff = BackoffManager(
             strategy="exponential",
-            base_delay=1.0,
-            max_delay=min(30.0, config.interval_s * 0.8),
+            base_delay=max(2.0, float(config.interval_s) * 2.0),
+            max_delay=max(30.0, float(config.interval_s) * 10.0),
             max_attempts=None  # Unlimited attempts
         )
+        # Next earliest time we should probe (set after each result)
+        self._next_probe_earliest: Optional[float] = None
     
     def __del__(self):
         """Clean up HTTP client."""
@@ -64,7 +67,8 @@ class HealthProbe:
     
     def probe(self) -> HealthResult:
         """Perform a single health check probe."""
-        self.last_probe_time = time.time()
+        now = time.time()
+        self.last_probe_time = now
         
         logger.info(f"Health check attempt {self.consecutive_failures + 1} for {self.worker_url}")
         
@@ -87,6 +91,9 @@ class HealthProbe:
             old_status = self.current_status
             self._update_state(result)
             
+            # Schedule next probe time based on success/failure
+            self._schedule_next_probe(result)
+
             # Log result
             if result.status == HealthStatus.HEALTHY:
                 logger.info(f"Health check SUCCESS for {self.worker_url}: {result.status_code} in {response_time_ms:.1f}ms")
@@ -108,6 +115,7 @@ class HealthProbe:
             )
             old_status = self.current_status
             self._update_state(result)
+            self._schedule_next_probe(result)
             
             if old_status != self.current_status:
                 logger.info(f"Worker {self.worker_url} status: {old_status} -> {self.current_status} (failures: {self.consecutive_failures})")
@@ -123,6 +131,7 @@ class HealthProbe:
             )
             old_status = self.current_status
             self._update_state(result)
+            self._schedule_next_probe(result)
             
             if old_status != self.current_status:
                 logger.info(f"Worker {self.worker_url} status: {old_status} -> {self.current_status} (failures: {self.consecutive_failures})")
@@ -138,6 +147,7 @@ class HealthProbe:
             )
             old_status = self.current_status
             self._update_state(result)
+            self._schedule_next_probe(result)
             
             if old_status != self.current_status:
                 logger.info(f"Worker {self.worker_url} status: {old_status} -> {self.current_status} (failures: {self.consecutive_failures})")
@@ -217,12 +227,12 @@ class HealthProbe:
         return time.time() - self.last_probe_time
     
     def should_probe(self) -> bool:
-        """Check if it's time for the next probe based on interval."""
-        if self.last_probe_time is None:
+        """Check if it's time for the next probe based on interval/backoff."""
+        # First probe happens immediately
+        if self.last_probe_time is None or self._next_probe_earliest is None:
             return True
-        
-        time_since_last = self.time_since_last_probe()
-        return time_since_last >= self.config.interval_s
+
+        return time.time() >= self._next_probe_earliest
     
     def reset(self) -> None:
         """Reset probe state."""
@@ -232,6 +242,23 @@ class HealthProbe:
         self.current_status = HealthStatus.UNKNOWN
         self.last_successful_probe = None
         self.backoff.reset()
+        self._next_probe_earliest = None
+
+    def _schedule_next_probe(self, result: HealthResult) -> None:
+        """Schedule the next probe time using interval or backoff."""
+        now = time.time()
+        if result.status == HealthStatus.HEALTHY:
+            # Normal cadence when healthy
+            self._next_probe_earliest = now + float(self.config.interval_s)
+            self.backoff.reset()
+        else:
+            # Increase delay between attempts during startup/failure.
+            # BackoffManager yields 0.0 on first attempt; ensure a sensible minimum delay.
+            delay = self.backoff.next_delay()
+            min_delay = max(5.0, float(self.config.interval_s) * 2.0)
+            if delay is None or delay <= 0.01:
+                delay = min_delay
+            self._next_probe_earliest = now + float(delay)
 
 
 class HealthMonitor:
