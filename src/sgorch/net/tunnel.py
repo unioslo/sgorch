@@ -35,7 +35,7 @@ class TunnelSpec:
 class TunnelInfo:
     """Information about an active tunnel."""
     spec: TunnelSpec
-    process: subprocess.Popen
+    process: Optional[subprocess.Popen]
     started_at: float
     last_check: float
     check_failures: int = 0
@@ -76,12 +76,31 @@ class TunnelManager:
             if existing:
                 self._stop_tunnel(key, existing)
             
-            # Create new tunnel
-            tunnel_info = self._create_tunnel(spec)
-            self.tunnels[key] = tunnel_info
-            
-            logger.info(f"Tunnel {key} established: {tunnel_info.advertised_url}")
-            return tunnel_info.advertised_url
+            # Try to create a new managed tunnel, with graceful adoption if port busy
+            try:
+                tunnel_info = self._create_tunnel(spec)
+                self.tunnels[key] = tunnel_info
+                logger.info(f"Tunnel {key} established: {tunnel_info.advertised_url}")
+                return tunnel_info.advertised_url
+            except RuntimeError as e:
+                msg = str(e)
+                if "Address already in use" in msg and spec.mode == "local":
+                    # If something else already listens and the port is reachable, adopt
+                    if test_tcp_connection("127.0.0.1", spec.advertise_port, timeout=2):
+                        adopted = TunnelInfo(
+                            spec=spec,
+                            process=None,
+                            started_at=time.time(),
+                            last_check=time.time(),
+                            advertised_url=f"http://{spec.advertise_host}:{spec.advertise_port}"
+                        )
+                        self.tunnels[key] = adopted
+                        logger.info(
+                            f"Tunnel {key} adopted existing local forward on port {spec.advertise_port}: {adopted.advertised_url}"
+                        )
+                        return adopted.advertised_url
+                # Otherwise re-raise to surface error
+                raise
     
     def is_up(self, key: str) -> bool:
         """Check if a tunnel is up and healthy."""
@@ -223,8 +242,8 @@ class TunnelManager:
     
     def _is_tunnel_healthy(self, tunnel: TunnelInfo) -> bool:
         """Check if a tunnel is healthy."""
-        # Check if process is alive
-        if not self._is_process_alive(tunnel.process):
+        # If we manage a process, verify it; if not (adopted), rely on TCP check below
+        if tunnel.process is not None and not self._is_process_alive(tunnel.process):
             return False
         
         # For local tunnels, test the local port
@@ -235,8 +254,10 @@ class TunnelManager:
         # (we can't easily test from this end)
         return True
     
-    def _is_process_alive(self, process: subprocess.Popen) -> bool:
+    def _is_process_alive(self, process: Optional[subprocess.Popen]) -> bool:
         """Check if a process is still running."""
+        if process is None:
+            return True
         return process.poll() is None
     
     def _stop_tunnel(self, key: str, tunnel: TunnelInfo) -> None:
@@ -250,7 +271,7 @@ class TunnelManager:
     
     def _cleanup_process(self, process: subprocess.Popen) -> None:
         """Clean up a process, trying graceful shutdown first."""
-        if process.poll() is not None:
+        if process is None or process.poll() is not None:
             # Process already dead
             return
         
