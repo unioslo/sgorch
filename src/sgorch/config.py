@@ -4,12 +4,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, validator
-try:
-    from ruamel.yaml import YAML
-    YAML_AVAILABLE = True
-except ImportError:
-    import yaml as pyyaml
-    YAML_AVAILABLE = False
+from ruamel.yaml import YAML
 
 
 class MetricsConfig(BaseModel):
