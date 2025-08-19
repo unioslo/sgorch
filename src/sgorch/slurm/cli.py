@@ -153,20 +153,24 @@ class SlurmCliAdapter(ISlurm):
             raise
     
     def list_jobs(self, name_prefix: str) -> List[JobInfo]:
-        """List jobs with name prefix using squeue."""
+        """List jobs with names starting with the given prefix using squeue.
+
+        We filter by name on the client side using the formatted output to avoid
+        relying on cluster-specific squeue matching semantics.
+        """
         logger.debug(f"Listing jobs with prefix: {name_prefix}")
-        
-        # Use squeue to get jobs for current user with name filter
+
+        # Use squeue to get jobs for current user
         import os
         current_user = os.getenv('USER', os.getenv('USERNAME', 'ME'))
-        
+
         cmd = [
             'squeue',
             '--user', current_user,
             '--format', '%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R',
             '--noheader'
         ]
-        
+
         try:
             result = subprocess.run(
                 cmd,
@@ -174,19 +178,27 @@ class SlurmCliAdapter(ISlurm):
                 text=True,
                 timeout=self.timeout
             )
-            
+
             if result.returncode != 0:
-                logger.error(f"squeue failed: {result.stderr}")
+                logger.error(f"squeue failed: {result.stderr} {result.stdout}")
                 return []
-            
-            all_jobs = parse_squeue_output(result.stdout)
-            # TODO: Implement proper name filtering - for now return all jobs
-            # The reconciler will filter by job_id patterns
-            logger.debug(f"Found {len(all_jobs)} total jobs (name filtering not implemented)")
-            return all_jobs
-            
+
+            # Client-side filter by job name (3rd column, index 2)
+            filtered_lines: list[str] = []
+            for line in (ln for ln in result.stdout.splitlines() if ln.strip()):
+                parts = line.split()
+                if len(parts) >= 3:
+                    job_name = parts[2]
+                    if job_name.startswith(name_prefix):
+                        filtered_lines.append(line)
+
+            filtered_output = "\n".join(filtered_lines)
+            jobs = parse_squeue_output(filtered_output)
+            logger.debug(f"Found {len(jobs)} jobs matching prefix {name_prefix}")
+            return jobs
+
         except subprocess.TimeoutExpired:
-            logger.error(f"squeue command timed out")
+            logger.error("squeue command timed out")
             return []
         except Exception as e:
             logger.error(f"Error listing jobs: {e}")
