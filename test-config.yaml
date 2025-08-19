@@ -7,7 +7,7 @@ orchestrator:
     type: log_only
 
 deployments:
-  - name: gpt-20b
+  - name: gpt-120b
     replicas: 2
     connectivity:
       mode: tunneled
@@ -34,7 +34,7 @@ deployments:
       partition: "GPUQ"
       gres: "gpu:1"
       constraint: "h100"
-      time_limit: "02:00:00"
+      time_limit: "08:00:00"
       cpus_per_task: 24
       mem: "128G"
       log_dir: "/cluster/home/jonalsa/sg-logs"
@@ -43,7 +43,7 @@ deployments:
         HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
 
     sglang:
-      model_path: "openai/gpt-oss-20b"
+      model_path: "openai/gpt-oss-120b"
       venv_path: "/cluster/home/jonalsa/sglang-test/.venv"
       args:
         - "--host"
@@ -53,18 +53,18 @@ deployments:
         - "--reasoning-parser"
         - "gpt-oss"
         - "--context-length"
-        - "32000"  # Smaller for testing
+        - "96000"
         - "--mem-fraction-static"
-        - "0.8"
+        - "0.9"
         - "--tp"
         - "1"
 
     health:
       path: "/health"
-      interval_s: 5
+      interval_s: 10
       timeout_s: 10
       consecutive_ok_for_ready: 2
-      failures_to_unhealthy: 30  # Allow many failed attempts during startup
+      failures_to_unhealthy: 60  # Allow many failed attempts during startup
       # No auth headers needed for testing
 
     policy:
