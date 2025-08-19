@@ -2,3 +2,6 @@
 .venv/
 .claude/
 .sgorch-state.json
+.hypothesis/
+.pytest_cache/
+.coverage
