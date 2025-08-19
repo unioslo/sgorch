@@ -27,10 +27,10 @@ class StateConfig(BaseModel):
     file_path: Optional[str] = None
 
 
-# OrchestratorConfig is defined later to include router_probe
+# OrchestratorConfig is defined later
 
 
-class RouterProbeConfig(BaseModel):
+class NodeProbeConfig(BaseModel):
     enabled: bool = False
     interval_s: int = 60
     timeout_s: int = 10
@@ -44,7 +44,7 @@ class OrchestratorConfig(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     state: StateConfig = Field(default_factory=StateConfig)
-    router_probe: RouterProbeConfig = Field(default_factory=RouterProbeConfig)
+    node_probe: NodeProbeConfig = Field(default_factory=NodeProbeConfig)
 
 
 class SSHConfig(BaseModel):
@@ -183,6 +183,8 @@ def load_config(config_path: str | Path) -> Config:
 
     # Expand environment variables
     expanded_data = expand_env_vars(raw_data)
+
+    # No backward-compat aliases; config uses orchestrator.node_probe only
 
     # Validate with Pydantic
     return Config(**expanded_data)

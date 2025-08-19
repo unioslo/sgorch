@@ -3,9 +3,9 @@ orchestrator:
     enabled: true
     bind: "0.0.0.0"
     port: 9315
-  router_probe:
+  node_probe:
     enabled: true
-    interval_s: 30
+    interval_s: 60
     timeout_s: 10
     prompt: "ping"
   notifications:
