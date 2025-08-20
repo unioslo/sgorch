@@ -44,13 +44,14 @@ class GPUMonitorWorker(threading.Thread):
 
         while not self._stop_event.is_set():
             try:
-                # Get nodes where this deployment has jobs running
-                nodes = self._get_deployment_nodes()
+                # Get nodes and their corresponding job IDs for this deployment
+                node_to_job = self._get_deployment_jobs()
+                logger.debug(f"GPU monitor found {len(node_to_job)} jobs for {self.deployment_config.name}: {node_to_job}")
                 
-                for node in nodes:
+                for node, job_id in node_to_job.items():
                     success = False
                     try:
-                        gpu_infos = self._query_gpu_metrics(node)
+                        gpu_infos = self._query_gpu_metrics_by_job(job_id, node)
                         success = len(gpu_infos) > 0
                         
                         if success:
@@ -74,7 +75,7 @@ class GPUMonitorWorker(threading.Thread):
                         )
                         
                     except Exception as e:
-                        logger.debug(f"GPU monitoring failed for {self.deployment_config.name} on {node}: {e}")
+                        logger.debug(f"GPU monitoring failed for {self.deployment_config.name} on {node} (job {job_id}): {e}")
                         metrics.record_gpu_monitor_attempt(
                             self.deployment_config.name, 
                             node, 
@@ -86,15 +87,15 @@ class GPUMonitorWorker(threading.Thread):
             
             self._stop_event.wait(interval)
 
-    def _get_deployment_nodes(self) -> List[str]:
-        """Get list of nodes where this deployment has running jobs."""
+    def _get_deployment_jobs(self) -> Dict[str, str]:
+        """Get mapping of nodes to job IDs for this deployment's running jobs."""
         job_prefix = f"sgl-{self.deployment_config.name}-"
         
         try:
-            # Use squeue to find running jobs for this deployment
+            # Use squeue to find running jobs for this deployment with both job ID and node info
             cmd = [
                 'squeue', 
-                '--format=%N', 
+                '--format=%i,%N',  # JobID,NodeList
                 '--noheader',
                 '--states=RUNNING',
                 f'--name={job_prefix}*'
@@ -109,19 +110,31 @@ class GPUMonitorWorker(threading.Thread):
             
             if result.returncode != 0:
                 logger.debug(f"squeue failed: {result.stderr}")
-                return []
+                return {}
             
-            # Parse node list - SLURM can return ranges like "node[01-02]" 
-            nodes = set()
+            # Parse job info: JobID,NodeList
+            node_to_job = {}
             for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    nodes.update(self._expand_node_list(line.strip()))
+                if not line.strip():
+                    continue
+                    
+                parts = line.strip().split(',', 1)
+                if len(parts) != 2:
+                    continue
+                    
+                job_id = parts[0].strip()
+                node_spec = parts[1].strip()
+                
+                # Expand node list - SLURM can return ranges like "node[01-02]"
+                nodes = self._expand_node_list(node_spec)
+                for node in nodes:
+                    node_to_job[node] = job_id
             
-            return list(nodes)
+            return node_to_job
             
         except Exception as e:
-            logger.debug(f"Failed to get deployment nodes: {e}")
-            return []
+            logger.debug(f"Failed to get deployment jobs: {e}")
+            return {}
 
     def _expand_node_list(self, node_spec: str) -> List[str]:
         """Expand SLURM node specification like 'node[01-02]' into individual nodes."""
@@ -138,20 +151,12 @@ class GPUMonitorWorker(threading.Thread):
             # Single node or comma-separated list
             return [node.strip() for node in node_spec.split(',')]
 
-    def _query_gpu_metrics(self, node: str) -> List[GPUInfo]:
-        """Query GPU metrics from a specific node using srun + nvidia-smi."""
-        # Use the deployment's SLURM configuration for srun
-        account = self.gpu_config.account or self.deployment_config.slurm.account
-        partition = self.gpu_config.partition or self.deployment_config.slurm.partition
-        
-        # Build srun command to run nvidia-smi on the target node
+    def _query_gpu_metrics_by_job(self, job_id: str, node: str) -> List[GPUInfo]:
+        """Query GPU metrics from a specific job using srun + nvidia-smi."""
+        # Build srun command to run nvidia-smi on the existing job
         cmd = [
             'srun',
-            '--nodelist', node,
-            '--account', account,
-            '--partition', partition,
-            '--job-name', f'gpu-monitor-{self.deployment_config.name}',
-            '--time', '00:01:00',  # Very short time limit
+            '--jobid', job_id,
             '--quiet',  # Suppress srun output
             'nvidia-smi',
             '--query-gpu=index,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,fan.speed',
@@ -159,6 +164,7 @@ class GPUMonitorWorker(threading.Thread):
         ]
         
         try:
+            logger.debug(f"GPU monitor running command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -167,16 +173,16 @@ class GPUMonitorWorker(threading.Thread):
             )
             
             if result.returncode != 0:
-                logger.debug(f"srun nvidia-smi failed on {node}: {result.stderr}")
+                logger.debug(f"srun nvidia-smi failed for job {job_id} on {node}: {result.stderr}")
                 return []
             
             return self._parse_nvidia_smi_output(result.stdout)
             
         except subprocess.TimeoutExpired:
-            logger.debug(f"GPU monitoring timed out for node {node}")
+            logger.debug(f"GPU monitoring timed out for job {job_id} on {node}")
             return []
         except Exception as e:
-            logger.debug(f"GPU monitoring failed for node {node}: {e}")
+            logger.debug(f"GPU monitoring failed for job {job_id} on {node}: {e}")
             return []
 
     def _parse_nvidia_smi_output(self, output: str) -> List[GPUInfo]:
