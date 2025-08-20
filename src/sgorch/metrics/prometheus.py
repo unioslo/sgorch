@@ -190,6 +190,63 @@ class SGOrchMetrics:
             registry=self.registry
         )
         
+        # GPU metrics
+        self.gpu_utilization = Gauge(
+            'sgorch_gpu_utilization_percent',
+            'GPU utilization percentage',
+            ['deployment', 'node', 'gpu_id'],
+            registry=self.registry
+        )
+        
+        self.gpu_memory_used = Gauge(
+            'sgorch_gpu_memory_used_bytes',
+            'GPU memory used in bytes',
+            ['deployment', 'node', 'gpu_id'],
+            registry=self.registry
+        )
+        
+        self.gpu_memory_total = Gauge(
+            'sgorch_gpu_memory_total_bytes',
+            'GPU memory total in bytes',
+            ['deployment', 'node', 'gpu_id'],
+            registry=self.registry
+        )
+        
+        self.gpu_temperature = Gauge(
+            'sgorch_gpu_temperature_celsius',
+            'GPU temperature in Celsius',
+            ['deployment', 'node', 'gpu_id'],
+            registry=self.registry
+        )
+        
+        self.gpu_power_draw = Gauge(
+            'sgorch_gpu_power_draw_watts',
+            'GPU power draw in watts',
+            ['deployment', 'node', 'gpu_id'],
+            registry=self.registry
+        )
+        
+        self.gpu_fan_speed = Gauge(
+            'sgorch_gpu_fan_speed_percent',
+            'GPU fan speed percentage',
+            ['deployment', 'node', 'gpu_id'],
+            registry=self.registry
+        )
+        
+        self.gpu_monitor_total = Counter(
+            'sgorch_gpu_monitor_total',
+            'Total number of GPU monitoring attempts',
+            ['deployment', 'node', 'status'],
+            registry=self.registry
+        )
+        
+        self.gpu_monitor_timestamp = Gauge(
+            'sgorch_gpu_monitor_timestamp',
+            'Timestamp of last GPU monitoring',
+            ['deployment', 'node'],
+            registry=self.registry
+        )
+        
         self._http_server_port: Optional[int] = None
         self._lock = Lock()
     
@@ -297,6 +354,41 @@ class SGOrchMetrics:
     def update_blacklisted_nodes(self, deployment: str, count: int) -> None:
         """Update blacklisted nodes count."""
         self.blacklisted_nodes.labels(deployment=deployment).set(count)
+    
+    def record_gpu_metrics(
+        self, 
+        deployment: str, 
+        node: str, 
+        gpu_id: str,
+        utilization: Optional[float] = None,
+        memory_used: Optional[int] = None,
+        memory_total: Optional[int] = None,
+        temperature: Optional[float] = None,
+        power_draw: Optional[float] = None,
+        fan_speed: Optional[float] = None
+    ) -> None:
+        """Record GPU metrics for a specific GPU."""
+        labels = {'deployment': deployment, 'node': node, 'gpu_id': gpu_id}
+        
+        if utilization is not None:
+            self.gpu_utilization.labels(**labels).set(utilization)
+        if memory_used is not None:
+            self.gpu_memory_used.labels(**labels).set(memory_used)
+        if memory_total is not None:
+            self.gpu_memory_total.labels(**labels).set(memory_total)
+        if temperature is not None:
+            self.gpu_temperature.labels(**labels).set(temperature)
+        if power_draw is not None:
+            self.gpu_power_draw.labels(**labels).set(power_draw)
+        if fan_speed is not None:
+            self.gpu_fan_speed.labels(**labels).set(fan_speed)
+    
+    def record_gpu_monitor_attempt(self, deployment: str, node: str, success: bool) -> None:
+        """Record a GPU monitoring attempt."""
+        status = "success" if success else "failure"
+        self.gpu_monitor_total.labels(deployment=deployment, node=node, status=status).inc()
+        if success:
+            self.gpu_monitor_timestamp.labels(deployment=deployment, node=node).set(time.time())
     
     def cleanup_deployment_metrics(self, deployment: str) -> None:
         """Clean up metrics for a removed deployment."""

@@ -14,6 +14,7 @@ from .notify.log_only import LogOnlyNotifier
 from .metrics.prometheus import get_metrics
 from .state.file_store import FileStateStore
 from .monitor.node_probe import NodeProbeManager
+from .monitor.gpu_monitor import GPUMonitorManager
 
 
 logger = get_logger(__name__)
@@ -28,6 +29,7 @@ class Orchestrator:
         self.running = False
         self.threads: List[threading.Thread] = []
         self.node_probe_mgr: NodeProbeManager | None = None
+        self.gpu_monitor_mgr: GPUMonitorManager | None = None
         # Initialize state store (file backend; path from config if provided)
         file_path = getattr(self.config.orchestrator.state, 'file_path', None)
         self.state_store = FileStateStore(file_path=file_path)
@@ -43,6 +45,9 @@ class Orchestrator:
 
         # Initialize node probes (optional)
         self._setup_node_probes()
+        
+        # Initialize GPU monitoring (optional)
+        self._setup_gpu_monitoring()
         
         logger.info(f"Orchestrator initialized with {len(self.reconcilers)} deployments")
     
@@ -73,6 +78,21 @@ class Orchestrator:
                 self.node_probe_mgr.start_for(deploy_config, reconciler.router_client)
             except Exception as e:
                 logger.error(f"Failed to start node probe for {deploy_config.name}: {e}")
+    
+    def _setup_gpu_monitoring(self) -> None:
+        """Initialize GPU monitoring manager."""
+        gpu_cfg = getattr(self.config.orchestrator, 'gpu_monitor', None)
+        if not gpu_cfg or not gpu_cfg.enabled:
+            return
+        
+        self.gpu_monitor_mgr = GPUMonitorManager(gpu_cfg)
+        
+        # Start GPU monitoring for each deployment
+        for deploy_config in self.config.deployments:
+            try:
+                self.gpu_monitor_mgr.start_for(deploy_config)
+            except Exception as e:
+                logger.error(f"Failed to start GPU monitoring for {deploy_config.name}: {e}")
     
     def _setup_reconcilers(self) -> None:
         """Initialize reconcilers for each deployment."""
@@ -248,6 +268,13 @@ class Orchestrator:
                 self.node_probe_mgr.stop_all()
             except Exception as e:
                 logger.error(f"Error stopping node probe manager: {e}")
+        
+        # Stop GPU monitoring threads
+        if self.gpu_monitor_mgr:
+            try:
+                self.gpu_monitor_mgr.stop_all()
+            except Exception as e:
+                logger.error(f"Error stopping GPU monitor manager: {e}")
         
         # Wait for threads to finish
         for thread in self.threads:

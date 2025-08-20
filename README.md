@@ -28,6 +28,7 @@ SGOrch follows a microservices-like architecture with clear separation of concer
 - **Health Monitor**: Monitors worker health via HTTP probes
 - **Tunnel Manager**: Creates and supervises SSH tunnels
 - **Port Allocator**: Manages port allocation to avoid conflicts
+- **GPU Monitor**: Real-time GPU metrics collection via nvidia-smi
 - **Failure Policies**: Node blacklisting, backoff, circuit breakers
 - **Discovery System**: Graceful resumption by adopting existing workers
 
@@ -39,6 +40,7 @@ SGOrch follows a microservices-like architecture with clear separation of concer
 - **SSH Tunneling**: Both local (-L) and reverse (-R) tunnel modes
 - **Failure Recovery**: Node blacklisting, exponential backoff, graceful draining
 - **Stateless Resumption**: Automatically adopts existing workers on restart
+- **GPU Monitoring**: Real-time GPU utilization, memory, temperature, and power metrics
 - **Prometheus Metrics**: Comprehensive monitoring and alerting
 - **Structured Logging**: JSON logs for observability
 - **Production Ready**: Systemd integration, signal handling, graceful shutdown
@@ -48,10 +50,11 @@ SGOrch follows a microservices-like architecture with clear separation of concer
 ### Prerequisites
 
 - Python 3.10+
-- SLURM cluster access with `squeue`, `sbatch`, `scancel` commands
+- SLURM cluster access with `squeue`, `sbatch`, `scancel`, `srun` commands
 - SGLang installed in a virtual environment
 - Network access between orchestrator VM and compute nodes
 - SSH access to compute nodes (for tunneled mode)
+- NVIDIA GPUs with nvidia-smi installed (for GPU monitoring)
 
 ### Setup
 
@@ -87,6 +90,10 @@ orchestrator:
     enabled: true
     bind: "0.0.0.0" 
     port: 9315
+  gpu_monitor:
+    enabled: true
+    interval_s: 30
+    timeout_s: 15
   notifications:
     type: log_only
 
@@ -127,6 +134,8 @@ deployments:
       log_dir: "/path/to/logs"
       env:
         HF_HOME: "/path/to/hf-cache"
+        PYTORCH_NUM_THREADS: "{CPUS_PER_TASK}"
+        OMP_NUM_THREADS: "{CPUS_PER_TASK}"
 
     sglang:
       model_path: "openai/gpt-oss-20b"
@@ -160,7 +169,7 @@ deployments:
 
 ### Configuration Sections
 
-- **orchestrator**: Global settings for metrics and notifications
+- **orchestrator**: Global settings for metrics, GPU monitoring, and notifications
 - **deployments**: List of SGLang deployments to manage
 - **connectivity**: Network setup (direct vs tunneled access)
 - **router**: SGLang router connection and authentication
@@ -168,6 +177,22 @@ deployments:
 - **sglang**: Model path, virtual environment, and launch arguments
 - **health**: Health check configuration with authentication
 - **policy**: Failure handling, backoff, and recovery policies
+
+### Variable Substitution
+
+SGOrch supports dynamic variable substitution in configuration files:
+
+- **{CPUS_PER_TASK}**: Replaced with the deployment's `cpus_per_task` value
+- **{PORT}**: Replaced with the assigned port at runtime
+
+Example:
+```yaml
+slurm:
+  cpus_per_task: 24
+  env:
+    PYTORCH_NUM_THREADS: "{CPUS_PER_TASK}"  # Becomes "24"
+    OMP_NUM_THREADS: "{CPUS_PER_TASK}"      # Becomes "24"
+```
 
 ## Usage
 
@@ -257,17 +282,81 @@ Router → VM:local_port → SSH tunnel → ComputeNode:remote_port
 Router → VM:advertise_port ← SSH tunnel ← ComputeNode:remote_port
 ```
 
+## GPU Monitoring
+
+SGOrch provides comprehensive GPU monitoring by collecting real-time metrics from compute nodes using `srun` and `nvidia-smi`.
+
+### How It Works
+
+1. **Node Discovery**: Automatically discovers compute nodes running deployment jobs via `squeue`
+2. **Metric Collection**: Uses `srun --nodelist=nodeX nvidia-smi` to query GPU metrics
+3. **Data Processing**: Parses nvidia-smi CSV output and converts to Prometheus metrics
+4. **Continuous Monitoring**: Runs at configurable intervals (default: 30 seconds)
+
+### Configuration
+
+Enable GPU monitoring in your configuration:
+
+```yaml
+orchestrator:
+  gpu_monitor:
+    enabled: true
+    interval_s: 30              # Monitoring interval in seconds
+    timeout_s: 15               # Timeout for srun commands
+    # Optional SLURM overrides:
+    # account: "monitoring-account"
+    # partition: "gpu-partition"
+```
+
+### Collected Metrics
+
+For each GPU on each compute node:
+- **Utilization**: GPU compute utilization percentage
+- **Memory**: Used and total GPU memory in bytes
+- **Temperature**: GPU temperature in Celsius
+- **Power**: GPU power draw in watts
+- **Fan Speed**: GPU fan speed percentage (when available)
+
+### Example Queries
+
+Useful Prometheus queries for GPU monitoring:
+
+```promql
+# Average GPU utilization across all deployments
+avg(sgorch_gpu_utilization_percent)
+
+# GPU memory utilization percentage
+(sgorch_gpu_memory_used_bytes / sgorch_gpu_memory_total_bytes) * 100
+
+# GPUs running hot (>80°C)
+sgorch_gpu_temperature_celsius > 80
+
+# High power consumption GPUs
+sgorch_gpu_power_draw_watts > 400
+```
+
 ## Monitoring and Observability
 
 ### Prometheus Metrics
 
 SGOrch exposes metrics on port 9315 by default:
 
+**Worker Metrics:**
 - `sgorch_workers_desired{deployment}`: Desired worker count
 - `sgorch_workers_ready{deployment}`: Ready worker count  
 - `sgorch_workers_unhealthy{deployment}`: Unhealthy worker count
 - `sgorch_tunnels_up{deployment}`: Active tunnel count
 - `sgorch_restarts_total{deployment,reason}`: Worker restart count
+
+**GPU Metrics:**
+- `sgorch_gpu_utilization_percent{deployment,node,gpu_id}`: GPU utilization percentage
+- `sgorch_gpu_memory_used_bytes{deployment,node,gpu_id}`: GPU memory used in bytes
+- `sgorch_gpu_memory_total_bytes{deployment,node,gpu_id}`: GPU memory total in bytes
+- `sgorch_gpu_temperature_celsius{deployment,node,gpu_id}`: GPU temperature in Celsius
+- `sgorch_gpu_power_draw_watts{deployment,node,gpu_id}`: GPU power draw in watts
+- `sgorch_gpu_fan_speed_percent{deployment,node,gpu_id}`: GPU fan speed percentage
+
+**System Metrics:**
 - `sgorch_router_errors_total{deployment,operation}`: Router API errors
 - `sgorch_slurm_errors_total{deployment,operation}`: SLURM operation errors
 
@@ -359,6 +448,10 @@ Test individual components:
 squeue -u $USER
 sbatch --test-only test-script.sh
 
+# Test GPU monitoring (replace JOB_ID with actual job)
+srun --jobid=12345 nvidia-smi
+srun --jobid=12345 nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv
+
 # Test router connectivity  
 curl -H "Authorization: $ROUTER_TOKEN" http://router:8080/workers/list
 
@@ -387,6 +480,9 @@ sgorch/
 │   │   ├── rest.py            # REST API adapter
 │   │   └── sbatch_templates.py # Job script templates
 │   ├── router/                # SGLang router integration
+│   ├── monitor/               # Monitoring systems
+│   │   ├── node_probe.py      # OpenAI API health probes
+│   │   └── gpu_monitor.py     # GPU metrics collection
 │   ├── health/                # Health monitoring
 │   ├── net/                   # Networking and tunnels
 │   ├── policy/                # Failure policies
@@ -407,6 +503,7 @@ sgorch/
 2. **New Notification Backend**: Implement `Notifier` interface in `notify/`
 3. **New Metrics**: Add to `metrics/prometheus.py` 
 4. **New Health Checks**: Extend `health/http_probe.py`
+5. **New Monitoring**: Add monitoring classes in `monitor/` (see `gpu_monitor.py` example)
 
 ### Testing
 

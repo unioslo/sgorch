@@ -40,11 +40,22 @@ class NodeProbeConfig(BaseModel):
     prompt: str = "ping"
 
 
+class GPUMonitorConfig(BaseModel):
+    enabled: bool = False
+    interval_s: int = 30
+    timeout_s: int = 15
+    # SLURM account to use for monitoring jobs (if different from deployment account)
+    account: Optional[str] = None
+    # SLURM partition to use for monitoring jobs (if different from deployment partition)  
+    partition: Optional[str] = None
+
+
 class OrchestratorConfig(BaseModel):
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     state: StateConfig = Field(default_factory=StateConfig)
     node_probe: NodeProbeConfig = Field(default_factory=NodeProbeConfig)
+    gpu_monitor: GPUMonitorConfig = Field(default_factory=GPUMonitorConfig)
 
 
 class SSHConfig(BaseModel):

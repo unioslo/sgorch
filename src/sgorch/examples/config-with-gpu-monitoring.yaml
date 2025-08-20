@@ -26,7 +26,7 @@ deployments:
       tunnel_mode: local
       orchestrator_host: "127.0.0.1"
       advertise_host: "127.0.0.1"
-      local_port_range: [30001, 30099]  # Avoid conflict with router on 30000
+      local_port_range: [30001, 30099]
       ssh:
         user: "jonalsa"
         opts: ["-o", "ServerAliveInterval=15", "-o", "ExitOnForwardFailure=yes"]
@@ -34,10 +34,9 @@ deployments:
     router:
       base_url: "http://127.0.0.1:30000"
       endpoints:
-        list: "/list_workers"  # SGLang router endpoint
-        add: "/add_worker"     # SGLang router endpoint
-        remove: "/remove_worker"  # SGLang router endpoint
-      # No auth needed for testing
+        list: "/list_workers"
+        add: "/add_worker"
+        remove: "/remove_worker"
 
     slurm:
       prefer: auto
@@ -85,12 +84,11 @@ deployments:
       interval_s: 10
       timeout_s: 10
       consecutive_ok_for_ready: 2
-      failures_to_unhealthy: 60  # Allow many failed attempts during startup
-      # No auth headers needed for testing
+      failures_to_unhealthy: 60
 
     policy:
       restart_backoff_s: 60
       deregister_grace_s: 10
-      start_grace_period_s: 900  # Give 15 minutes for startup
+      start_grace_period_s: 900
       predrain_seconds_before_walltime: 180
       node_blacklist_cooldown_s: 600
