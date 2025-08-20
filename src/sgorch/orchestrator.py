@@ -87,20 +87,23 @@ class Orchestrator:
     
     def _create_reconciler(self, deploy_config: DeploymentConfig) -> Reconciler:
         """Create a reconciler for a deployment."""
+        # Expand deployment-specific variables (e.g., {CPUS_PER_TASK})
+        expanded_config = deploy_config.expand_variables()
+        
         # Create SLURM adapter
-        slurm = self._create_slurm_adapter(deploy_config)
+        slurm = self._create_slurm_adapter(expanded_config)
         
         # Create router client
-        router_client = RouterClient(deploy_config.router)
+        router_client = RouterClient(expanded_config.router)
 
         # Optional: fast-fail if router is unreachable/misconfigured
         try:
             if not router_client.health_check():
-                base = deploy_config.router.base_url
-                list_ep = deploy_config.router.endpoints.list
-                add_ep = deploy_config.router.endpoints.add
-                rm_ep = deploy_config.router.endpoints.remove
-                auth = deploy_config.router.auth
+                base = expanded_config.router.base_url
+                list_ep = expanded_config.router.endpoints.list
+                add_ep = expanded_config.router.endpoints.add
+                rm_ep = expanded_config.router.endpoints.remove
+                auth = expanded_config.router.auth
                 hint = ""
                 if auth and auth.type == "header":
                     import os
@@ -111,13 +114,13 @@ class Orchestrator:
                     f"Router liveness check failed for {base}. Verify endpoints: list={list_ep} add={add_ep} remove={rm_ep}{hint}"
                 )
         except Exception as e:
-            logger.error(f"Router check failed for deployment {deploy_config.name}: {e}")
+            logger.error(f"Router check failed for deployment {expanded_config.name}: {e}")
             # Fail fast to surface misconfiguration early
             raise
         
         # Create reconciler
         return Reconciler(
-            deployment_config=deploy_config,
+            deployment_config=expanded_config,
             slurm=slurm,
             router_client=router_client,
             notifier=self.notifier,

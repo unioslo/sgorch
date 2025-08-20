@@ -37,7 +37,7 @@ deployments:
       account: "chatgpt"
       reservation: "gpt"
       partition: "GPUQ"
-      gres: "gpu:1"
+      gres: "gpu:2"
       constraint: "h100"
       time_limit: "08:00:00"
       cpus_per_task: 24
@@ -46,6 +46,11 @@ deployments:
       env:
         HF_HOME: "/cluster/home/jonalsa/.cache/huggingface"
         HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
+        TORCH_CUDA_ARCH_LIST: "9.0"
+        PYTORCH_NUM_THREADS: "{CPUS_PER_TASK}"
+        MKL_NUM_THREADS: "{CPUS_PER_TASK}"
+        OMP_NUM_THREADS: "{CPUS_PER_TASK}"
+        RAYON_NUM_THREADS: "{CPUS_PER_TASK}"
 
     sglang:
       model_path: "openai/gpt-oss-120b"
@@ -66,7 +71,7 @@ deployments:
         - "--mem-fraction-static"
         - "0.9"
         - "--tp"
-        - "1"
+        - "2"
 
     health:
       path: "/health"

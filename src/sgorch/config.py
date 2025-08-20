@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class MetricsConfig(BaseModel):
@@ -128,12 +128,28 @@ class DeploymentConfig(BaseModel):
     health: HealthConfig = Field(default_factory=HealthConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
 
+    def expand_variables(self) -> "DeploymentConfig":
+        """Return a copy with deployment-specific variables expanded.
+        
+        Currently supports:
+        - {CPUS_PER_TASK}: Replaced with slurm.cpus_per_task
+        - {PORT}: Can be used in sglang.args (handled at runtime)
+        """
+        replacements = {
+            "CPUS_PER_TASK": str(self.slurm.cpus_per_task)
+        }
+        
+        # Convert to dict, expand, and create new instance
+        data = self.model_dump()
+        expanded_data = expand_deployment_vars(data, replacements)
+        return DeploymentConfig(**expanded_data)
+
 
 class Config(BaseModel):
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     deployments: list[DeploymentConfig]
 
-    @validator("deployments")
+    @field_validator("deployments")
     def validate_unique_deployment_names(cls, v):
         names = [d.name for d in v]
         if len(names) != len(set(names)):
@@ -153,6 +169,22 @@ def expand_env_vars(data: Any) -> Any:
         return {k: expand_env_vars(v) for k, v in data.items()}
     elif isinstance(data, list):
         return [expand_env_vars(item) for item in data]
+    return data
+
+
+def expand_deployment_vars(data: Any, replacements: dict[str, str]) -> Any:
+    """Recursively expand {VAR} patterns using provided replacements."""
+    if isinstance(data, str):
+        # Replace {VAR} patterns
+        result = data
+        for var_name, var_value in replacements.items():
+            placeholder = f"{{{var_name}}}"
+            result = result.replace(placeholder, var_value)
+        return result
+    elif isinstance(data, dict):
+        return {k: expand_deployment_vars(v, replacements) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [expand_deployment_vars(item, replacements) for item in data]
     return data
 
 
