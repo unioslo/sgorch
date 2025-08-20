@@ -18,6 +18,11 @@ class SerializableWorker:
     health_status: str = "unknown"
     last_seen: Optional[float] = None
     submitted_at: float = 0.0
+    
+    # Configuration generation info (for persistence)
+    config_hash: Optional[str] = None
+    generation_id: Optional[str] = None
+    created_at: Optional[float] = None
 
 
 @dataclass

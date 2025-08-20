@@ -16,6 +16,9 @@ from .policy.failure import NodeBlacklist, FailureTracker, RestartPolicy
 from .discover.adopt import AdoptionManager
 from .metrics.prometheus import get_metrics
 from .state.base import StateStore, DeploymentSnapshot, SerializableWorker
+from .config_hash import ConfigSnapshot, WorkerGeneration
+from .replacement_engine import ReplacementEngine
+from .walltime_manager import WalltimeManager
 
 
 logger = get_logger(__name__)
@@ -35,11 +38,50 @@ class WorkerState:
     last_seen: Optional[float] = None
     submitted_at: float = 0
     
+    # Configuration generation tracking
+    generation: Optional[WorkerGeneration] = None
+    replacement_reason: Optional[str] = None  # Why this worker needs replacement
+    replacement_scheduled: bool = False  # Is replacement in progress
+    
     def is_healthy(self) -> bool:
         return self.health_status == HealthStatus.HEALTHY
     
     def is_unhealthy(self) -> bool:
         return self.health_status == HealthStatus.UNHEALTHY
+    
+    def needs_replacement(self, current_snapshot: ConfigSnapshot) -> bool:
+        """Check if this worker needs replacement due to config changes."""
+        if not self.generation:
+            # Legacy worker without generation info - assume needs replacement
+            return True
+        return self.generation.needs_replacement(current_snapshot)
+    
+    def get_replacement_reason(self, current_snapshot: ConfigSnapshot) -> Optional[str]:
+        """Get human-readable reason why worker needs replacement."""
+        if not self.generation:
+            return "legacy_worker_no_generation_info"
+        
+        if not self.generation.needs_replacement(current_snapshot):
+            return None
+            
+        old_snap = self.generation.config_snapshot
+        
+        # Check specific differences
+        reasons = []
+        if old_snap.gres != current_snapshot.gres:
+            reasons.append(f"gres: {old_snap.gres} → {current_snapshot.gres}")
+        if old_snap.cpus_per_task != current_snapshot.cpus_per_task:
+            reasons.append(f"cpus: {old_snap.cpus_per_task} → {current_snapshot.cpus_per_task}")
+        if old_snap.mem != current_snapshot.mem:
+            reasons.append(f"mem: {old_snap.mem} → {current_snapshot.mem}")
+        if old_snap.model_path != current_snapshot.model_path:
+            reasons.append(f"model: {old_snap.model_path} → {current_snapshot.model_path}")
+        if old_snap.sglang_args != current_snapshot.sglang_args:
+            reasons.append("sglang_args_changed")
+        if old_snap.env != current_snapshot.env:
+            reasons.append("environment_variables_changed")
+            
+        return "; ".join(reasons) if reasons else "config_changed"
 
 
 class Reconciler:
@@ -64,6 +106,11 @@ class Reconciler:
         self.workers: Dict[str, WorkerState] = {}  # job_id -> WorkerState
         self.running = True
         
+        # Configuration tracking
+        self.current_config_snapshot = ConfigSnapshot.from_deployment_config(deployment_config)
+        self.generation_counter = 0  # Increment for each new generation
+        self.active_replacements = 0  # Track concurrent replacements
+        
         # Components
         self.port_allocator = PortAllocator(deployment_config.connectivity.local_port_range)
         self.tunnel_manager = SupervisedTunnelManager()
@@ -77,8 +124,17 @@ class Reconciler:
             deregister_grace_seconds=deployment_config.policy.deregister_grace_s
         )
         
-        # Metrics
+        # Metrics  
         self.metrics = get_metrics()
+        
+        # Replacement engine
+        self.replacement_engine = ReplacementEngine(deployment_config.name)
+        
+        # Walltime manager
+        self.walltime_manager = WalltimeManager(
+            deployment_config.name,
+            deployment_config.policy.predrain_seconds_before_walltime
+        )
         
         # Load persisted state first, then adopt any existing workers
         self._load_persisted_state()
@@ -189,6 +245,9 @@ class Reconciler:
             
             # Handle failed workers
             self._handle_failed_workers()
+            
+            # Handle configuration-based replacements
+            self._handle_config_replacements()
             
             # Update metrics
             self._update_metrics()
@@ -329,16 +388,33 @@ class Reconciler:
             # Submit job
             job_id = self.slurm.submit(spec)
             
+            # Create worker generation info
+            self.generation_counter += 1
+            generation = WorkerGeneration(
+                config_hash=self.current_config_snapshot.compute_hash(),
+                config_snapshot=self.current_config_snapshot,
+                created_at=time.time(),
+                generation_id=f"{self.config.name}-gen-{self.generation_counter}"
+            )
+            
             # Create worker state
             worker = WorkerState(
                 job_id=job_id,
                 instance_uuid=instance_uuid,
                 remote_port=remote_port,
                 advertise_port=advertise_port,
-                submitted_at=time.time()
+                submitted_at=time.time(),
+                generation=generation
             )
             
             self.workers[job_id] = worker
+            
+            # Register with walltime manager
+            self.walltime_manager.register_worker(
+                job_id=job_id,
+                time_limit=self.config.slurm.time_limit,
+                submitted_at=worker.submitted_at
+            )
             
             # Log where to find the SGLang server logs
             sglang_log_path = f"{self.config.slurm.log_dir}/sglang_{self.config.name}_{job_id}.log"
@@ -578,11 +654,165 @@ class Reconciler:
         if worker.advertise_port and worker.advertise_port != worker.remote_port:
             self.port_allocator.release_port(worker.advertise_port)
         
+        # Unregister from walltime manager
+        self.walltime_manager.unregister_worker(job_id)
+        
         # Remove from our state
         del self.workers[job_id]
         
         self.logger.info(f"Removed worker: {job_id}")
         self._persist_state()
+    
+    def _handle_config_replacements(self) -> None:
+        """Handle workers that need replacement due to configuration changes."""
+        # Clean up timed out replacement tasks
+        self.replacement_engine.cleanup_timed_out_tasks()
+        
+        # Find workers that need replacement
+        workers_needing_replacement = []
+        
+        for worker in self.workers.values():
+            if worker.replacement_scheduled:
+                continue
+                
+            replacement_reason = None
+            
+            # Check for configuration changes
+            if worker.needs_replacement(self.current_config_snapshot):
+                replacement_reason = worker.get_replacement_reason(self.current_config_snapshot)
+            
+            # Check for walltime approaching
+            elif self.walltime_manager.should_start_proactive_replacement(worker.job_id):
+                urgency = self.walltime_manager.get_replacement_urgency(worker.job_id)
+                replacement_reason = f"walltime_approaching_{urgency}"
+                
+                # Log walltime replacement with details
+                window = self.walltime_manager.estimate_replacement_window(worker.job_id)
+                if window:
+                    self.logger.info(
+                        f"Worker {worker.job_id} approaching walltime: "
+                        f"{window['time_remaining_seconds']/60:.1f}min remaining, "
+                        f"urgency={urgency}, can_complete={window['can_complete_replacement']}"
+                    )
+            
+            if replacement_reason:
+                worker.replacement_reason = replacement_reason
+                workers_needing_replacement.append(worker.job_id)
+                self.logger.info(f"Worker {worker.job_id} needs replacement: {replacement_reason}")
+        
+        if not workers_needing_replacement:
+            return
+        
+        # Get current healthy worker count
+        healthy_workers = [w for w in self.workers.values() if w.is_healthy()]
+        current_healthy_count = len(healthy_workers)
+        
+        # Create replacement plan
+        plan = self.replacement_engine.plan_replacement(
+            workers_needing_replacement=workers_needing_replacement,
+            current_healthy_count=current_healthy_count,
+            desired_replicas=self.config.replicas,
+            replacement_reason="config_change"
+        )
+        
+        if not plan:
+            self.logger.warning(f"Cannot safely replace workers: need more healthy workers")
+            return
+        
+        self.logger.info(
+            f"Starting replacement plan: {len(plan.workers_to_replace)} workers, "
+            f"strategy={plan.strategy.value}, max_concurrent={plan.max_concurrent}, "
+            f"estimated_duration={plan.estimated_duration_minutes}min"
+        )
+        
+        # Start replacement tasks for workers we can handle
+        workers_to_start = []
+        for job_id in plan.workers_to_replace:
+            if self.replacement_engine.can_start_more_replacements(plan.max_concurrent):
+                workers_to_start.append(job_id)
+        
+        # Execute replacements
+        for job_id in workers_to_start:
+            try:
+                self._start_worker_replacement(job_id)
+            except Exception as e:
+                self.logger.error(f"Failed to start replacement for worker {job_id}: {e}")
+                self.replacement_engine.fail_replacement_task(job_id, str(e))
+        
+        # Update replacement tasks for existing workers
+        self._update_replacement_tasks()
+    
+    def _start_worker_replacement(self, old_job_id: str) -> None:
+        """Start replacement for a specific worker."""
+        old_worker = self.workers.get(old_job_id)
+        if not old_worker:
+            return
+        
+        # Mark worker as having replacement scheduled
+        old_worker.replacement_scheduled = True
+        
+        # Start replacement task
+        task = self.replacement_engine.start_replacement_task(old_job_id)
+        
+        # Start new worker
+        try:
+            self._start_worker()  # This will create a new worker with current config
+            
+            # Find the newly created worker (it will have the highest submitted_at time)
+            newest_worker = max(self.workers.values(), key=lambda w: w.submitted_at)
+            
+            # Update replacement task
+            self.replacement_engine.update_task_new_worker_started(old_job_id, newest_worker.job_id)
+            
+            self.logger.info(f"Started replacement worker {newest_worker.job_id} for {old_job_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to start replacement worker for {old_job_id}: {e}")
+            self.replacement_engine.fail_replacement_task(old_job_id, str(e))
+            old_worker.replacement_scheduled = False
+    
+    def _update_replacement_tasks(self) -> None:
+        """Update status of active replacement tasks."""
+        for task in list(self.replacement_engine.active_tasks.values()):
+            old_worker = self.workers.get(task.old_worker_job_id)
+            new_worker = None
+            
+            if task.replacement_job_id:
+                new_worker = self.workers.get(task.replacement_job_id)
+            
+            # Check if new worker is ready
+            if new_worker and new_worker.is_healthy() and not task.new_worker_ready_at:
+                self.replacement_engine.update_task_new_worker_ready(task.old_worker_job_id)
+            
+            # If new worker is ready, start draining old worker
+            if (task.new_worker_ready_at and not task.old_worker_drained_at 
+                and old_worker and old_worker.advertised_url):
+                
+                try:
+                    # Deregister old worker from router
+                    self.router_client.remove(old_worker.advertised_url)
+                    self.replacement_engine.update_task_old_worker_drained(task.old_worker_job_id)
+                    self.logger.info(f"Drained old worker {task.old_worker_job_id} from router")
+                    
+                    # Schedule old worker removal after grace period
+                    import threading
+                    def delayed_removal():
+                        time.sleep(self.replacement_engine.drain_grace_period_seconds)
+                        if task.old_worker_job_id in self.workers:
+                            try:
+                                self.slurm.cancel(task.old_worker_job_id)
+                                self._remove_worker(task.old_worker_job_id)
+                                self.replacement_engine.complete_replacement_task(task.old_worker_job_id)
+                                self.logger.info(f"Completed replacement of worker {task.old_worker_job_id}")
+                            except Exception as e:
+                                self.logger.error(f"Failed to complete replacement: {e}")
+                                self.replacement_engine.fail_replacement_task(task.old_worker_job_id, str(e))
+                    
+                    threading.Thread(target=delayed_removal, daemon=True).start()
+                    
+                except Exception as e:
+                    self.logger.error(f"Failed to drain old worker {task.old_worker_job_id}: {e}")
+                    self.replacement_engine.fail_replacement_task(task.old_worker_job_id, str(e))
     
     def _update_metrics(self) -> None:
         """Update Prometheus metrics."""
@@ -608,6 +838,35 @@ class Reconciler:
         
         blacklisted_nodes = len(self.node_blacklist.get_blacklisted_nodes())
         self.metrics.update_blacklisted_nodes(self.config.name, blacklisted_nodes)
+        
+        # Update replacement metrics
+        active_replacements = self.replacement_engine.get_active_replacement_count()
+        workers_needing_replacement = len([w for w in self.workers.values() 
+                                         if w.needs_replacement(self.current_config_snapshot)])
+        
+        # Count unique generations
+        generations = set()
+        for worker in self.workers.values():
+            if worker.generation:
+                generations.add(worker.generation.generation_id)
+        active_generations = len(generations)
+        
+        self.metrics.update_replacement_metrics(
+            self.config.name,
+            active_replacements=active_replacements,
+            workers_needing_replacement=workers_needing_replacement,
+            active_generations=active_generations
+        )
+        
+        # Update walltime metrics
+        walltime_stats = self.walltime_manager.get_walltime_statistics()
+        if walltime_stats:
+            self.metrics.update_walltime_metrics(
+                self.config.name,
+                workers_approaching_walltime=walltime_stats.get('workers_approaching_walltime', 0),
+                min_time_remaining_minutes=walltime_stats.get('min_time_remaining_minutes', 0),
+                avg_walltime_percent_complete=walltime_stats.get('avg_percent_complete', 0)
+            )
     
     def shutdown(self) -> None:
         """Shutdown the reconciler gracefully."""
@@ -629,6 +888,15 @@ class Reconciler:
         try:
             workers = []
             for w in self.workers.values():
+                # Include generation info for persistence
+                config_hash = None
+                generation_id = None  
+                created_at = None
+                if w.generation:
+                    config_hash = w.generation.config_hash
+                    generation_id = w.generation.generation_id
+                    created_at = w.generation.created_at
+                
                 workers.append(
                     SerializableWorker(
                         job_id=w.job_id,
@@ -641,6 +909,9 @@ class Reconciler:
                         health_status=w.health_status.value,
                         last_seen=w.last_seen,
                         submitted_at=w.submitted_at,
+                        config_hash=config_hash,
+                        generation_id=generation_id,
+                        created_at=created_at,
                     )
                 )
 

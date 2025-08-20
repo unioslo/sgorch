@@ -190,6 +190,64 @@ class SGOrchMetrics:
             registry=self.registry
         )
         
+        # Configuration management metrics
+        self.active_replacements = Gauge(
+            'sgorch_active_replacements',
+            'Number of active replacement tasks',
+            ['deployment'],
+            registry=self.registry
+        )
+        
+        self.completed_replacements_total = Counter(
+            'sgorch_completed_replacements_total',
+            'Total number of completed replacements',
+            ['deployment', 'reason', 'status'],
+            registry=self.registry
+        )
+        
+        self.workers_needing_replacement = Gauge(
+            'sgorch_workers_needing_replacement',
+            'Number of workers needing replacement',
+            ['deployment'],
+            registry=self.registry
+        )
+        
+        self.worker_generations_active = Gauge(
+            'sgorch_worker_generations_active',
+            'Number of different config generations active',
+            ['deployment'],
+            registry=self.registry
+        )
+        
+        # Walltime metrics
+        self.workers_approaching_walltime = Gauge(
+            'sgorch_workers_approaching_walltime',
+            'Number of workers approaching walltime limit',
+            ['deployment'],
+            registry=self.registry
+        )
+        
+        self.min_time_remaining_minutes = Gauge(
+            'sgorch_min_time_remaining_minutes',
+            'Minimum time remaining across all workers in minutes',
+            ['deployment'],
+            registry=self.registry
+        )
+        
+        self.avg_walltime_percent_complete = Gauge(
+            'sgorch_avg_walltime_percent_complete',
+            'Average walltime consumption percentage',
+            ['deployment'],
+            registry=self.registry
+        )
+        
+        self.replacement_duration_seconds = Histogram(
+            'sgorch_replacement_duration_seconds',
+            'Duration of worker replacements',
+            ['deployment', 'reason'],
+            registry=self.registry
+        )
+        
         self._http_server_port: Optional[int] = None
         self._lock = Lock()
     
@@ -297,6 +355,40 @@ class SGOrchMetrics:
     def update_blacklisted_nodes(self, deployment: str, count: int) -> None:
         """Update blacklisted nodes count."""
         self.blacklisted_nodes.labels(deployment=deployment).set(count)
+    
+    def update_replacement_metrics(
+        self,
+        deployment: str,
+        active_replacements: int,
+        workers_needing_replacement: int,
+        active_generations: int
+    ) -> None:
+        """Update configuration management metrics."""
+        self.active_replacements.labels(deployment=deployment).set(active_replacements)
+        self.workers_needing_replacement.labels(deployment=deployment).set(workers_needing_replacement)
+        self.worker_generations_active.labels(deployment=deployment).set(active_generations)
+    
+    def record_replacement_completed(self, deployment: str, reason: str, success: bool, duration_seconds: float) -> None:
+        """Record a completed replacement."""
+        status = "success" if success else "failure"
+        self.completed_replacements_total.labels(
+            deployment=deployment, 
+            reason=reason, 
+            status=status
+        ).inc()
+        self.replacement_duration_seconds.labels(deployment=deployment, reason=reason).observe(duration_seconds)
+    
+    def update_walltime_metrics(
+        self,
+        deployment: str,
+        workers_approaching_walltime: int,
+        min_time_remaining_minutes: float,
+        avg_walltime_percent_complete: float
+    ) -> None:
+        """Update walltime-related metrics."""
+        self.workers_approaching_walltime.labels(deployment=deployment).set(workers_approaching_walltime)
+        self.min_time_remaining_minutes.labels(deployment=deployment).set(min_time_remaining_minutes)
+        self.avg_walltime_percent_complete.labels(deployment=deployment).set(avg_walltime_percent_complete)
     
     def cleanup_deployment_metrics(self, deployment: str) -> None:
         """Clean up metrics for a removed deployment."""
