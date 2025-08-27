@@ -88,6 +88,9 @@ class SlurmConfig(BaseModel):
     gres: str
     constraint: Optional[str] = None
     time_limit: str = "24:00:00"
+    # Offset each replica's walltime to avoid simultaneous expiry.
+    # Effective time limit becomes: base time_limit + instance_idx * time_limit_stagger_s
+    time_limit_stagger_s: int = 0
     cpus_per_task: int = 16
     mem: str = "64G"
     log_dir: str

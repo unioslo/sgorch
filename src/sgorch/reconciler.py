@@ -358,6 +358,31 @@ class Reconciler:
     def _create_job_spec(self, instance_idx: int, instance_uuid: str, remote_port: int) -> SubmitSpec:
         """Create SLURM job specification."""
         job_name = f"sgl-{self.config.name}-{instance_idx}"
+
+        # Compute effective time limit with optional stagger per replica
+        def _hms_to_seconds(hms: str) -> int:
+            try:
+                parts = hms.split(":")
+                if len(parts) != 3:
+                    raise ValueError
+                h, m, s = (int(parts[0]), int(parts[1]), int(parts[2]))
+                return h * 3600 + m * 60 + s
+            except Exception:
+                # Fall back to 24h if misconfigured
+                return 24 * 3600
+
+        def _seconds_to_hms(total: int) -> str:
+            if total < 0:
+                total = 0
+            h = total // 3600
+            rem = total % 3600
+            m = rem // 60
+            s = rem % 60
+            return f"{h:02d}:{m:02d}:{s:02d}"
+
+        base_seconds = _hms_to_seconds(self.config.slurm.time_limit)
+        stagger = max(0, int(getattr(self.config.slurm, "time_limit_stagger_s", 0)))
+        effective_time_limit = _seconds_to_hms(base_seconds + instance_idx * stagger)
         
         # Render job script
         script = render_sbatch_script(
@@ -369,7 +394,7 @@ class Reconciler:
             gres=self.config.slurm.gres,
             cpus=self.config.slurm.cpus_per_task,
             mem=self.config.slurm.mem,
-            time_limit=self.config.slurm.time_limit,
+            time_limit=effective_time_limit,
             reservation=self.config.slurm.reservation,
             qos=self.config.slurm.qos,
             constraint=self.config.slurm.constraint,
@@ -391,7 +416,7 @@ class Reconciler:
             qos=self.config.slurm.qos,
             gres=self.config.slurm.gres,
             constraint=self.config.slurm.constraint,
-            time_limit=self.config.slurm.time_limit,
+            time_limit=effective_time_limit,
             cpus_per_task=self.config.slurm.cpus_per_task,
             mem=self.config.slurm.mem,
             env=self.config.slurm.env,

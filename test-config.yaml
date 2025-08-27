@@ -40,6 +40,7 @@ deployments:
       gres: "gpu:2"
       constraint: "h100"
       time_limit: "08:00:00"
+      time_limit_stagger_s: 1800  # Stagger replicas by 30 minutes to avoid simultaneous expiry
       cpus_per_task: 24
       mem: "128G"
       log_dir: "/cluster/home/jonalsa/sg-logs"
