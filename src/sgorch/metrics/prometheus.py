@@ -11,6 +11,9 @@ from ..config import MetricsConfig
 logger = get_logger(__name__)
 
 
+from .worker_proxy import WorkerMetricsProxy
+
+
 class SGOrchMetrics:
     """Prometheus metrics for SGOrch."""
     
@@ -192,6 +195,8 @@ class SGOrchMetrics:
         
         self._http_server_port: Optional[int] = None
         self._lock = Lock()
+        # Dynamic worker metrics proxy
+        self._worker_proxy = WorkerMetricsProxy(self.registry)
     
     def update_worker_counts(
         self,
@@ -332,6 +337,14 @@ class SGOrchMetrics:
         """Check if metrics server is running."""
         with self._lock:
             return self._http_server_port is not None
+
+    # Worker metrics proxy control
+    def set_worker_metrics_endpoints(self, deployment: str, endpoints: list[str], enabled: bool) -> None:
+        """Update which worker endpoints to scrape for a deployment."""
+        try:
+            self._worker_proxy.set_endpoints(deployment, endpoints, enabled)
+        except Exception as e:
+            logger.debug(f"Failed updating worker metrics endpoints for {deployment}: {e}")
 
 
 # Global metrics instance

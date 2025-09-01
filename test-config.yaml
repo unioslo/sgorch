@@ -14,6 +14,7 @@ orchestrator:
 deployments:
   - name: gpt-120b
     replicas: 2
+    enable_worker_metrics: true
     connectivity:
       mode: tunneled
       tunnel_mode: local

@@ -130,6 +130,10 @@ class DeploymentConfig(BaseModel):
     sglang: SGLangConfig
     health: HealthConfig = Field(default_factory=HealthConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    # When enabled, SGOrch will:
+    # 1) Ensure "--enable-metrics" is in the SGLang launch arguments (if not already present)
+    # 2) Dynamically proxy each worker's Prometheus metrics into the orchestrator metrics
+    enable_worker_metrics: bool = False
 
     def expand_variables(self) -> "DeploymentConfig":
         """Return a copy with deployment-specific variables expanded.

@@ -385,6 +385,12 @@ class Reconciler:
         effective_time_limit = _seconds_to_hms(base_seconds + instance_idx * stagger)
         
         # Render job script
+        # If worker metrics are enabled, ensure SGLang starts with --enable-metrics
+        sglang_args = list(self.config.sglang.args)
+        if getattr(self.config, "enable_worker_metrics", False):
+            if "--enable-metrics" not in sglang_args:
+                raise ValueError("enable_worker_metrics is enabled but --enable-metrics is not in sglang.args")
+
         script = render_sbatch_script(
             deploy_name=self.config.name,
             instance_idx=instance_idx,
@@ -402,7 +408,7 @@ class Reconciler:
             env_vars=self.config.slurm.env,
             model_path=self.config.sglang.model_path,
             remote_port=remote_port,
-            sglang_args=self.config.sglang.args,
+            sglang_args=sglang_args,
             health_path=self.config.health.path,
             sglang_venv_path=self.config.sglang.venv_path,
             sbatch_extra=self.config.slurm.sbatch_extra
@@ -633,6 +639,17 @@ class Reconciler:
         
         blacklisted_nodes = len(self.node_blacklist.get_blacklisted_nodes())
         self.metrics.update_blacklisted_nodes(self.config.name, blacklisted_nodes)
+
+        # Update worker metrics proxy endpoints if enabled
+        endpoints: list[str] = []
+        for w in self.workers.values():
+            if w.worker_url:
+                endpoints.append(w.worker_url)
+        self.metrics.set_worker_metrics_endpoints(
+            self.config.name,
+            endpoints,
+            enabled=getattr(self.config, "enable_worker_metrics", False)
+        )
     
     def shutdown(self) -> None:
         """Shutdown the reconciler gracefully."""
