@@ -58,6 +58,7 @@ deployments:
       model_path: "openai/gpt-oss-120b"
       venv_path: "/cluster/home/jonalsa/sglang-test/.venv"
       args:
+        - "--enable-metrics"
         - "--host"
         - "0.0.0.0"
         - "--port"
