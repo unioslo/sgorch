@@ -21,6 +21,8 @@ class DiscoveredWorker:
     job_id: str
     instance_uuid: str
     worker_url: str
+    # Stable replica index if known (parsed from logs/job name)
+    instance_idx: int | None = None
     node: Optional[str] = None
     remote_port: Optional[int] = None
     advertise_port: Optional[int] = None
@@ -92,6 +94,14 @@ class WorkerDiscovery:
             for log_file in log_files:
                 worker = self._parse_log_file(log_file, job)
                 if worker:
+                    # Try to parse instance index from filename: sgl-<name>-<idx>_<jobid>.out
+                    try:
+                        import re
+                        m = re.match(rf"sgl-{re.escape(self.config.name)}-(\d+)_\d+\.out$", log_file.name)
+                        if m:
+                            worker.instance_idx = int(m.group(1))
+                    except Exception:
+                        pass
                     return worker
         
         return None
@@ -123,6 +133,7 @@ class WorkerDiscovery:
                                 job_id=job.job_id,
                                 instance_uuid=instance_uuid,
                                 worker_url=worker_url,
+                                instance_idx=None,
                                 node=job.node,
                                 remote_port=remote_port,
                                 log_file=str(log_file)

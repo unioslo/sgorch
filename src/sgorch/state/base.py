@@ -10,6 +10,9 @@ class SerializableWorker:
     """Serializable snapshot of a worker's state."""
     job_id: str
     instance_uuid: str
+    # Stable replica slot index (for staggered time limits). Optional for
+    # backward compatibility with existing state files.
+    instance_idx: int | None = None
     node: Optional[str] = None
     remote_port: Optional[int] = None
     advertise_port: Optional[int] = None
@@ -36,7 +39,12 @@ class DeploymentSnapshot:
 
     @staticmethod
     def from_dict(data: Dict) -> "DeploymentSnapshot":
-        workers = [SerializableWorker(**w) for w in data.get("workers", [])]
+        # Allow older snapshots without instance_idx
+        workers: list[SerializableWorker] = []
+        for w in data.get("workers", []):
+            if "instance_idx" not in w:
+                w = {**w, "instance_idx": None}
+            workers.append(SerializableWorker(**w))
         allocated_ports = data.get("allocated_ports", [])
         return DeploymentSnapshot(
             name=data["name"],
@@ -59,4 +67,3 @@ class StateStore(ABC):
     @abstractmethod
     def delete_deployment(self, name: str) -> None:
         pass
-

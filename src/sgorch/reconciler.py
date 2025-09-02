@@ -26,6 +26,8 @@ class WorkerState:
     """State of a managed worker."""
     job_id: str
     instance_uuid: str
+    # Stable replica slot index, used for staggered time limits
+    instance_idx: int | None = None
     node: Optional[str] = None
     remote_port: Optional[int] = None
     advertise_port: Optional[int] = None
@@ -85,6 +87,9 @@ class Reconciler:
 
         # Perform initial adoption
         self._adopt_existing_workers()
+
+        # Try to recover missing instance indices from log filenames
+        self._recover_missing_indices_from_logs()
         
         self.logger.info("Reconciler initialized")
 
@@ -102,6 +107,7 @@ class Reconciler:
                 worker = WorkerState(
                     job_id=sw.job_id,
                     instance_uuid=sw.instance_uuid,
+                    instance_idx=getattr(sw, "instance_idx", None),
                     node=sw.node,
                     remote_port=sw.remote_port,
                     advertise_port=sw.advertise_port,
@@ -143,6 +149,7 @@ class Reconciler:
                 worker = WorkerState(
                     job_id=job_id,
                     instance_uuid=discovered.instance_uuid,
+                    instance_idx=discovered.instance_idx,
                     node=discovered.node,
                     remote_port=discovered.remote_port,
                     worker_url=discovered.worker_url,
@@ -314,7 +321,7 @@ class Reconciler:
         try:
             # Generate unique instance ID
             instance_uuid = str(uuid.uuid4())
-            instance_idx = len(self.workers)
+            instance_idx = self._allocate_instance_index()
             
             # Allocate ports
             remote_port = self.port_allocator.allocate_port()
@@ -333,6 +340,7 @@ class Reconciler:
             worker = WorkerState(
                 job_id=job_id,
                 instance_uuid=instance_uuid,
+                instance_idx=instance_idx,
                 remote_port=remote_port,
                 advertise_port=advertise_port,
                 submitted_at=time.time()
@@ -430,6 +438,50 @@ class Reconciler:
             stderr=f"{self.config.slurm.log_dir}/{job_name}_%j.err",
             script=script
         )
+
+    def _allocate_instance_index(self) -> int:
+        """Choose the smallest non-negative replica index not currently in use.
+
+        Prefers indices in [0..replicas-1], but if all are unexpectedly used,
+        continues searching upwards to guarantee uniqueness.
+        """
+        used: set[int] = set()
+        for w in self.workers.values():
+            if w.instance_idx is not None:
+                used.add(int(w.instance_idx))
+        # Scan for smallest free index
+        i = 0
+        limit = max(self.config.replicas - 1, 0)
+        while True:
+            if i not in used:
+                return i
+            i += 1
+
+    def _recover_missing_indices_from_logs(self) -> None:
+        """Try to assign instance indices by parsing SLURM stdout filenames.
+
+        Filenames are '{log_dir}/%x_%j.out' where %x=job name 'sgl-<deploy>-<idx>'.
+        """
+        import re
+        from pathlib import Path
+        log_dir = Path(self.config.slurm.log_dir)
+        if not log_dir.exists():
+            return
+        pattern = re.compile(rf"^sgl-{re.escape(self.config.name)}-(\d+)_\d+\.out$")
+        try:
+            for w in self.workers.values():
+                if w.instance_idx is not None:
+                    continue
+                # Glob for this job's stdout file
+                # Use a conservative glob limited by job_id
+                for p in log_dir.glob(f"sgl-{self.config.name}-*_{w.job_id}.out"):
+                    m = pattern.match(p.name)
+                    if m:
+                        w.instance_idx = int(m.group(1))
+                        break
+        except Exception:
+            # Best-effort recovery; ignore errors
+            pass
     
     def _manage_tunnels(self) -> None:
         """Manage SSH tunnels for workers."""
@@ -675,6 +727,7 @@ class Reconciler:
                     SerializableWorker(
                         job_id=w.job_id,
                         instance_uuid=w.instance_uuid,
+                        instance_idx=w.instance_idx,
                         node=w.node,
                         remote_port=w.remote_port,
                         advertise_port=w.advertise_port,
