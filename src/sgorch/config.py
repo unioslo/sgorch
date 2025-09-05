@@ -106,17 +106,17 @@ class SGLangConfig(BaseModel):
 
 class HealthConfig(BaseModel):
     path: str = "/health"
-    interval_s: int = 5
-    timeout_s: int = 3
+    interval_s: int = 10
+    timeout_s: int = 5
     consecutive_ok_for_ready: int = 2
-    failures_to_unhealthy: int = 3
+    failures_to_unhealthy: int = 60
     headers: dict[str, str] = {}
 
 
 class PolicyConfig(BaseModel):
     restart_backoff_s: int = 60
     deregister_grace_s: int = 10
-    start_grace_period_s: int = 600
+    start_grace_period_s: int = 1800
     predrain_seconds_before_walltime: int = 180
     node_blacklist_cooldown_s: int = 600
 
