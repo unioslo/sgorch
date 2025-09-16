@@ -14,6 +14,7 @@ from .notify.log_only import LogOnlyNotifier
 from .metrics.prometheus import get_metrics
 from .state.file_store import FileStateStore
 from .monitor.node_probe import NodeProbeManager
+from .backends import make_backend_adapter
 
 
 logger = get_logger(__name__)
@@ -92,39 +93,50 @@ class Orchestrator:
         
         # Create SLURM adapter
         slurm = self._create_slurm_adapter(expanded_config)
-        
-        # Create router client
-        router_client = RouterClient(expanded_config.router)
 
-        # Optional: fast-fail if router is unreachable/misconfigured
-        try:
-            if not router_client.health_check():
-                base = expanded_config.router.base_url
-                list_ep = expanded_config.router.endpoints.list
-                add_ep = expanded_config.router.endpoints.add
-                rm_ep = expanded_config.router.endpoints.remove
-                auth = expanded_config.router.auth
-                hint = ""
-                if auth and auth.type == "header":
-                    import os
-                    token_env = auth.header_value_env
-                    if not os.getenv(token_env):
-                        hint = f" (missing env {token_env})"
-                raise RuntimeError(
-                    f"Router liveness check failed for {base}. Verify endpoints: list={list_ep} add={add_ep} remove={rm_ep}{hint}"
+        backend = make_backend_adapter(expanded_config)
+
+        router_client = None
+        if backend.requires_router:
+            if not expanded_config.router:
+                raise ValueError(
+                    f"Deployment {expanded_config.name} requires router configuration for backend {backend.display_name}"
                 )
-        except Exception as e:
-            logger.error(f"Router check failed for deployment {expanded_config.name}: {e}")
-            # Fail fast to surface misconfiguration early
-            raise
-        
+            router_client = RouterClient(expanded_config.router)
+
+            # Optional: fast-fail if router is unreachable/misconfigured
+            try:
+                if not router_client.health_check():
+                    base = expanded_config.router.base_url
+                    list_ep = expanded_config.router.endpoints.list
+                    add_ep = expanded_config.router.endpoints.add
+                    rm_ep = expanded_config.router.endpoints.remove
+                    auth = expanded_config.router.auth
+                    hint = ""
+                    if auth and auth.type == "header":
+                        import os
+                        token_env = auth.header_value_env
+                        if not os.getenv(token_env):
+                            hint = f" (missing env {token_env})"
+                    raise RuntimeError(
+                        f"Router liveness check failed for {base}. Verify endpoints: list={list_ep} add={add_ep} remove={rm_ep}{hint}"
+                    )
+            except Exception as e:
+                logger.error(f"Router check failed for deployment {expanded_config.name}: {e}")
+                raise
+        elif expanded_config.router:
+            logger.warning(
+                f"Router configuration for deployment {expanded_config.name} is ignored by backend {backend.display_name}"
+            )
+
         # Create reconciler
         return Reconciler(
             deployment_config=expanded_config,
             slurm=slurm,
             router_client=router_client,
             notifier=self.notifier,
-            state_store=self.state_store
+            state_store=self.state_store,
+            backend_adapter=backend,
         )
     
     def _create_slurm_adapter(self, deploy_config: DeploymentConfig) -> ISlurm:

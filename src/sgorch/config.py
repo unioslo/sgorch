@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class MetricsConfig(BaseModel):
@@ -34,7 +34,7 @@ class NodeProbeConfig(BaseModel):
     enabled: bool = False
     interval_s: int = 60
     timeout_s: int = 10
-    # Optional override; if None, use deployment.sglang.model_path
+    # Optional override; if None, use backend-specific default model identifier
     model: Optional[str] = None
     # Simple prompt used for the probe
     prompt: str = "ping"
@@ -98,10 +98,31 @@ class SlurmConfig(BaseModel):
     sbatch_extra: list[str] = []
 
 
-class SGLangConfig(BaseModel):
+class BackendBase(BaseModel):
+    """Marker base class for deployment backends."""
+
+    type: Literal["sglang", "tei"]
+
+
+class SGLangConfig(BackendBase):
+    type: Literal["sglang"] = "sglang"
     model_path: str
     venv_path: Optional[str] = None
     args: list[str] = []
+
+
+class TEIConfig(BackendBase):
+    type: Literal["tei"] = "tei"
+    # Optional explicit path to the text-embeddings-router binary. If unset, assumes PATH lookup.
+    binary_path: Optional[str] = None
+    model_id: str
+    revision: Optional[str] = None
+    args: list[str] = []
+    env: dict[str, str] = Field(default_factory=dict)
+    prometheus_port: Optional[int] = None
+
+
+BackendConfig = SGLangConfig | TEIConfig
 
 
 class HealthConfig(BaseModel):
@@ -125,9 +146,9 @@ class DeploymentConfig(BaseModel):
     name: str
     replicas: int
     connectivity: ConnectivityConfig
-    router: RouterConfig
+    router: Optional[RouterConfig] = None
     slurm: SlurmConfig
-    sglang: SGLangConfig
+    backend: BackendConfig = Field(discriminator="type")
     health: HealthConfig = Field(default_factory=HealthConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     # When enabled, SGOrch will:
@@ -137,19 +158,51 @@ class DeploymentConfig(BaseModel):
 
     def expand_variables(self) -> "DeploymentConfig":
         """Return a copy with deployment-specific variables expanded.
-        
+
         Currently supports:
         - {CPUS_PER_TASK}: Replaced with slurm.cpus_per_task
-        - {PORT}: Can be used in sglang.args (handled at runtime)
+        - {PORT}: Can be used in backend.args (handled at runtime)
         """
         replacements = {
             "CPUS_PER_TASK": str(self.slurm.cpus_per_task)
         }
-        
+
         # Convert to dict, expand, and create new instance
         data = self.model_dump()
         expanded_data = expand_deployment_vars(data, replacements)
         return DeploymentConfig(**expanded_data)
+
+    @property
+    def sglang(self) -> SGLangConfig:
+        if isinstance(self.backend, SGLangConfig):
+            return self.backend
+        raise AttributeError("Deployment backend is not SGLang")
+
+    @property
+    def tei(self) -> TEIConfig:
+        if isinstance(self.backend, TEIConfig):
+            return self.backend
+        raise AttributeError("Deployment backend is not TEI")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_backend(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        # Allow legacy "sglang" block to populate backend automatically
+        if "backend" not in data:
+            legacy_cfg = data.pop("sglang", None)
+            if legacy_cfg is None:
+                raise ValueError("Deployment config missing backend configuration")
+            if isinstance(legacy_cfg, dict):
+                data["backend"] = {"type": "sglang", **legacy_cfg}
+            else:
+                data["backend"] = legacy_cfg
+        elif "sglang" in data:
+            raise ValueError("Specify either 'backend' or legacy 'sglang', not both")
+
+        return data
 
 
 class Config(BaseModel):

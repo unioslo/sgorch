@@ -98,8 +98,11 @@ class NodeProbeManager:
         self._workers: dict[str, dict[str, NodeProbeWorker]] = {}
         self._stops: dict[str, threading.Event] = {}
 
-    def start_for(self, deployment: DeploymentConfig, router_client: RouterClient) -> None:
+    def start_for(self, deployment: DeploymentConfig, router_client: RouterClient | None) -> None:
         if not self.cfg.enabled:
+            return
+        if router_client is None:
+            logger.info(f"Node probe disabled for {deployment.name}: backend has no router")
             return
         name = deployment.name
         if name in self._syncers:

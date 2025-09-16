@@ -131,12 +131,21 @@ def status(
                     None
                 )
                 if deploy_config:
+                    backend = deploy_config.backend
+                    backend_info = {"type": backend.type}
+                    if backend.type == "sglang":
+                        backend_info["model_path"] = deploy_config.sglang.model_path
+                    elif backend.type == "tei":
+                        backend_info["model_id"] = deploy_config.tei.model_id
+
                     status_data = {
                         "deployment": deployment,
                         "replicas": deploy_config.replicas,
-                        "model": deploy_config.sglang.model_path,
+                        "backend": backend_info,
                         "connectivity_mode": deploy_config.connectivity.mode
                     }
+                    if deploy_config.router:
+                        status_data["router"] = deploy_config.router.base_url
                 else:
                     status_data = {"error": f"Deployment '{deployment}' not found"}
             
@@ -151,9 +160,16 @@ def status(
                 if deployment is None or deploy.name == deployment:
                     print(f"\n{deploy.name}:")
                     print(f"  Replicas: {deploy.replicas}")
-                    print(f"  Model: {deploy.sglang.model_path}")
+                    backend = deploy.backend
+                    if backend.type == "sglang":
+                        print(f"  Backend: SGLang ({deploy.sglang.model_path})")
+                    elif backend.type == "tei":
+                        print(f"  Backend: TEI ({deploy.tei.model_id})")
+                    else:
+                        print(f"  Backend: {backend.type}")
                     print(f"  Connectivity: {deploy.connectivity.mode}")
-                    print(f"  Router: {deploy.router.base_url}")
+                    if deploy.router:
+                        print(f"  Router: {deploy.router.base_url}")
             
             if deployment and not any(d.name == deployment for d in cfg.deployments):
                 print(f"\nError: Deployment '{deployment}' not found")

@@ -8,6 +8,7 @@ from sgorch.config import (
     RouterConfig,
     SlurmConfig,
     SGLangConfig,
+    TEIConfig,
     HealthConfig,
     PolicyConfig,
 )
@@ -28,6 +29,25 @@ def _dep_cfg(tmp_path, mode="direct"):
         router=RouterConfig(base_url="http://router"),
         slurm=SlurmConfig(account="a", partition="p", gres="g", log_dir=str(tmp_path)),
         sglang=SGLangConfig(model_path="/m"),
+        health=HealthConfig(),
+        policy=PolicyConfig(restart_backoff_s=1, deregister_grace_s=0),
+    )
+
+
+def _tei_cfg(tmp_path):
+    return DeploymentConfig(
+        name="tei",
+        replicas=1,
+        connectivity=ConnectivityConfig(
+            mode="direct",
+            tunnel_mode="local",
+            orchestrator_host="o",
+            advertise_host="127.0.0.1",
+            local_port_range=(41000, 41010),
+        ),
+        router=None,
+        slurm=SlurmConfig(account="a", partition="p", gres="g", log_dir=str(tmp_path)),
+        backend=TEIConfig(model_id="gte", args=["--json-output"]),
         health=HealthConfig(),
         policy=PolicyConfig(restart_backoff_s=1, deregister_grace_s=0),
     )
@@ -211,3 +231,19 @@ def test_failed_worker_cleanup(monkeypatch, tmp_path):
     assert "1" not in r.workers
     # router remove called
     assert fake_router.removed[-1] == "http://127.0.0.1:30000"
+
+
+def test_reconciler_without_router_for_tei(monkeypatch, tmp_path):
+    cfg = _tei_cfg(tmp_path)
+    fake_slurm = _FakeSlurm()
+    fake_state = _FakeStateStore()
+    monkeypatch.setattr("sgorch.reconciler.get_metrics", lambda: _FakeMetrics())
+
+    r = Reconciler(cfg, fake_slurm, router_client=None, notifier=None, state_store=fake_state)  # type: ignore[arg-type]
+    r.health_monitor = _FakeHealthMonitor()
+    r.tunnel_manager.ensure = lambda *a, **k: ""
+
+    r.tick()
+
+    assert len(fake_slurm.submits) == 1
+    assert r.router_client is None

@@ -16,6 +16,7 @@ from .policy.failure import NodeBlacklist, FailureTracker, RestartPolicy
 from .discover.adopt import AdoptionManager
 from .metrics.prometheus import get_metrics
 from .state.base import StateStore, DeploymentSnapshot, SerializableWorker
+from .backends import BackendAdapter, LaunchContext, make_backend_adapter
 
 
 logger = get_logger(__name__)
@@ -51,13 +52,15 @@ class Reconciler:
         self,
         deployment_config: DeploymentConfig,
         slurm: ISlurm,
-        router_client: RouterClient,
+        router_client: Optional[RouterClient],
         notifier: Notifier,
-        state_store: StateStore
+        state_store: StateStore,
+        backend_adapter: BackendAdapter | None = None,
     ):
         self.config = deployment_config
         self.slurm = slurm
         self.router_client = router_client
+        self.backend = backend_adapter or make_backend_adapter(deployment_config)
         self.notifier = notifier
         self.state_store = state_store
         self.logger = logger.bind(deployment=deployment_config.name)
@@ -139,7 +142,8 @@ class Reconciler:
                 self.config,
                 self.slurm,
                 self.router_client,
-                self.port_allocator
+                self.port_allocator,
+                self.backend
             )
             
             adopted = adoption_manager.adopt_existing_workers()
@@ -348,11 +352,11 @@ class Reconciler:
             
             self.workers[job_id] = worker
             
-            # Log where to find the SGLang server logs
-            sglang_log_path = f"{self.config.slurm.log_dir}/sglang_{self.config.name}_{job_id}.log"
+            # Log where to find backend logs
+            backend_log_path = self.backend.log_file_path(job_id)
             self.logger.info(f"Started worker: job_id={job_id}, uuid={instance_uuid}")
-            self.logger.info(f"SGLang server logs: {sglang_log_path}")
-            self.logger.info(f"Monitor SGLang startup: tail -f {sglang_log_path}")
+            self.logger.info(f"{self.backend.display_name} logs: {backend_log_path}")
+            self.logger.info(f"Monitor startup: tail -f {backend_log_path}")
             self.metrics.record_job_submitted(self.config.name)
             
         except Exception as e:
@@ -365,7 +369,7 @@ class Reconciler:
     
     def _create_job_spec(self, instance_idx: int, instance_uuid: str, remote_port: int) -> SubmitSpec:
         """Create SLURM job specification."""
-        job_name = f"sgl-{self.config.name}-{instance_idx}"
+        job_name = f"{self.backend.job_name_prefix}-{self.config.name}-{instance_idx}"
 
         # Compute effective time limit with optional stagger per replica
         def _hms_to_seconds(hms: str) -> int:
@@ -392,12 +396,17 @@ class Reconciler:
         stagger = max(0, int(getattr(self.config.slurm, "time_limit_stagger_s", 0)))
         effective_time_limit = _seconds_to_hms(base_seconds + instance_idx * stagger)
         
-        # Render job script
-        # If worker metrics are enabled, ensure SGLang starts with --enable-metrics
-        sglang_args = list(self.config.sglang.args)
+        # Validate backend-specific worker metrics requirements
         if getattr(self.config, "enable_worker_metrics", False):
-            if "--enable-metrics" not in sglang_args:
-                raise ValueError("enable_worker_metrics is enabled but --enable-metrics is not in sglang.args")
+            self.backend.validate_worker_metrics()
+
+        launch_plan = self.backend.build_launch_plan(
+            LaunchContext(
+                instance_idx=instance_idx,
+                instance_uuid=instance_uuid,
+                remote_port=remote_port,
+            )
+        )
 
         script = render_sbatch_script(
             deploy_name=self.config.name,
@@ -409,16 +418,16 @@ class Reconciler:
             cpus=self.config.slurm.cpus_per_task,
             mem=self.config.slurm.mem,
             time_limit=effective_time_limit,
+            job_name_prefix=self.backend.job_name_prefix,
+            display_name=self.backend.display_name,
+            launch_plan=launch_plan,
             reservation=self.config.slurm.reservation,
             qos=self.config.slurm.qos,
             constraint=self.config.slurm.constraint,
             log_dir=self.config.slurm.log_dir,
             env_vars=self.config.slurm.env,
-            model_path=self.config.sglang.model_path,
             remote_port=remote_port,
-            sglang_args=sglang_args,
             health_path=self.config.health.path,
-            sglang_venv_path=self.config.sglang.venv_path,
             sbatch_extra=self.config.slurm.sbatch_extra
         )
         
@@ -530,6 +539,8 @@ class Reconciler:
     
     def _reconcile_router(self) -> None:
         """Reconcile router registrations."""
+        if not self.router_client:
+            return
         # Collect workers that should be registered (healthy with advertised URLs)
         healthy_workers = [w for w in self.workers.values() 
                           if w.is_healthy() and w.advertised_url]
@@ -611,7 +622,7 @@ class Reconciler:
                 self.logger.warning(f"Handling failed worker: {worker.job_id}")
                 
                 # Deregister from router first
-                if worker.advertised_url:
+                if worker.advertised_url and self.router_client:
                     try:
                         self.router_client.remove(worker.advertised_url)
                     except Exception as e:
@@ -639,7 +650,7 @@ class Reconciler:
             return
 
         # Proactively deregister from router if we had advertised a URL
-        if worker.advertised_url:
+        if worker.advertised_url and self.router_client:
             try:
                 self.router_client.remove(worker.advertised_url)
                 self.logger.info(f"Deregistered worker from router: {worker.advertised_url}")
