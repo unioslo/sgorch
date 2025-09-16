@@ -216,7 +216,7 @@ class Reconciler:
     def _update_worker_states(self) -> None:
         """Update worker states from SLURM."""
         # Get all our jobs from SLURM
-        job_prefix = f"sgl-{self.config.name}-"
+        job_prefix = f"{self.backend.job_name_prefix}-{self.config.name}-"
         slurm_jobs = self.slurm.list_jobs(job_prefix)
         
         # Update existing workers
