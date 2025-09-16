@@ -469,21 +469,23 @@ class Reconciler:
     def _recover_missing_indices_from_logs(self) -> None:
         """Try to assign instance indices by parsing SLURM stdout filenames.
 
-        Filenames are '{log_dir}/%x_%j.out' where %x=job name 'sgl-<deploy>-<idx>'.
+        Filenames are '{log_dir}/%x_%j.out' where %x is the backend-specific
+        job name '<prefix>-<deploy>-<idx>'.
         """
         import re
         from pathlib import Path
         log_dir = Path(self.config.slurm.log_dir)
         if not log_dir.exists():
             return
-        pattern = re.compile(rf"^sgl-{re.escape(self.config.name)}-(\d+)_\d+\.out$")
+        prefix = self.backend.job_name_prefix
+        pattern = re.compile(rf"^{re.escape(prefix)}-{re.escape(self.config.name)}-(\d+)_\d+\.out$")
         try:
             for w in self.workers.values():
                 if w.instance_idx is not None:
                     continue
                 # Glob for this job's stdout file
                 # Use a conservative glob limited by job_id
-                for p in log_dir.glob(f"sgl-{self.config.name}-*_{w.job_id}.out"):
+                for p in log_dir.glob(f"{prefix}-{self.config.name}-*_{w.job_id}.out"):
                     m = pattern.match(p.name)
                     if m:
                         w.instance_idx = int(m.group(1))
