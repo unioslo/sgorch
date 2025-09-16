@@ -95,13 +95,12 @@ deployments:
       node_blacklist_cooldown_s: 600
 
   # Example of a smaller deployment with different settings
-  - name: gpt-oss-small
+  - name: tei-bge
     replicas: 1
     backend:
       type: tei
-      binary_path: "/opt/tei/bin/text-embeddings-router"  # optional; defaults to PATH
+      binary_path: "~/.cargo/bin/text-embeddings-router"  # optional; defaults to PATH
       model_id: "BAAI/bge-base-en-v1.5"
-      revision: "main"
       args:
         - "--hostname"
         - "0.0.0.0"

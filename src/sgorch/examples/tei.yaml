@@ -1,0 +1,70 @@
+orchestrator:
+  metrics:
+    enabled: true
+    bind: "0.0.0.0"
+    port: 9315
+  notifications:
+    type: log_only           # future: email
+    email:                   # for future
+      smtp_host: null
+      from_addr: null
+      to_addrs: []
+
+deployments:
+  - name: tei-multilingual
+    replicas: 2
+    backend:
+      type: tei
+      binary_path: "~/.cargo/bin/text-embeddings-router"  # optional; defaults to PATH
+      model_id: "intfloat/multilingual-e5-large-instruct"
+      args:
+        - "--hostname"
+        - "0.0.0.0"
+        - "--port"
+        - "{PORT}"
+        - "--json-output"
+      env:
+        HF_TOKEN: "${HF_TOKEN}"
+        HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
+      prometheus_port: 9000
+    connectivity:
+      mode: tunneled
+      tunnel_mode: local
+      orchestrator_host: "127.0.0.1"
+      advertise_host: "127.0.0.1"
+      local_port_range: [32101, 32199]
+      ssh:
+        user: "jonalsa"
+        opts: ["-o", "ServerAliveInterval=15", "-o", "ExitOnForwardFailure=yes"]
+
+    slurm:
+      prefer: cli
+      account: "chatgpt"
+      reservation: "gpt"
+      partition: "GPUQ"
+      qos: null
+      gres: "gpu:1"
+      constraint: "a100"
+      time_limit: "04:00:00"
+      cpus_per_task: 8
+      mem: "32G"
+      log_dir: "/cluster/home/jonalsa/sg-logs"
+      env:
+        HF_HOME: "/cluster/home/jonalsa/.cache/huggingface"
+        HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
+
+    health:
+      path: "/health"
+      interval_s: 10
+      timeout_s: 10
+      consecutive_ok_for_ready: 3
+      failures_to_unhealthy: 2
+      headers:
+        Authorization: "${WORKER_HEALTH_TOKEN}"
+
+    policy:
+      restart_backoff_s: 90   # Medium backoff
+      deregister_grace_s: 15
+      start_grace_period_s: 900  # Allow time for model loading
+      predrain_seconds_before_walltime: 180
+      node_blacklist_cooldown_s: 1200
