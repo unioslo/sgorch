@@ -9,7 +9,7 @@ def parse_squeue_output(output: str) -> List[JobInfo]:
 
     Supports both header and headerless output, and works with the
     custom --format used by SlurmCliAdapter:
-      '%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R'
+      '%.18i %.9P %j %.8u %.2t %.10M %.6D %R'
     """
     jobs: List[JobInfo] = []
     lines = [ln for ln in output.strip().split('\n') if ln.strip()]
