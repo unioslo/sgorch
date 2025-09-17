@@ -1,10 +1,10 @@
-# SLURM ↔ SGLang Orchestrator — Final Spec
+# SLURM ↔ Text Inference Orchestrator — Final Spec
 
 ## 0) Scope & assumptions
 
 * Runs as a **user-level systemd service** on a VM inside the SLURM cluster.
 * Manages **multiple deployments** (each = model + router + slurm profile).
-* Launches SGLang workers as **SLURM jobs**, maintains **SSH tunnels** so the router can reach each worker, registers/deregisters with router, and health-checks workers (SLURM + `/health` with **auth**).
+* Launches inference workers (SGLang or Hugging Face TEI) as **SLURM jobs**, maintains **SSH tunnels** so routers/load balancers can reach each worker, registers/deregisters with a router when the backend requires it, and health-checks workers (SLURM + `/health` with **auth**).
 * Uses **slurmrestd** if available; otherwise falls back to CLI. The SLURM layer is an **interface** so it’s swappable later.
 * **Stateless** by design, but must **resume gracefully** by discovering current jobs, logs, and router workers.
 * Initial scaling is **fixed** per deployment (e.g., `replicas=2`), but architecture allows future dynamic scaling.
@@ -245,7 +245,8 @@ deployments:
         HUGGINGFACE_HUB_CACHE: "/mnt/hf-cache"
       sbatch_extra: []        # free-form extras
 
-    sglang:
+    backend:
+      type: sglang
       # args appended to: python -m sglang.launch_server
       model_path: "meta-llama/Llama-3.1-8B-Instruct"
       args:
@@ -276,6 +277,7 @@ deployments:
 
 Notes
 
+* **backend.type** selects the inference backend (`sglang` or `tei`). Router configuration is only required when the backend needs it (currently SGLang).
 * **{PORT}** is templated by the orchestrator per job.
 * `${ENV}` values are expanded at load time via pydantic-settings.
 

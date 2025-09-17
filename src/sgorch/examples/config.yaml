@@ -19,6 +19,24 @@ orchestrator:
 deployments:
   - name: gpt-oss-20b
     replicas: 2
+    backend:
+      type: sglang
+      # args appended to: python3 -m sglang.launch_server
+      model_path: "openai/gpt-oss-20b"
+      venv_path: "/cluster/home/jonalsa/sglang-test/.venv"  # SGLang virtual environment
+      args:
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "{PORT}"
+        - "--reasoning-parser"
+        - "gpt-oss"
+        - "--context-length"
+        - "64000"
+        - "--mem-fraction-static"
+        - "0.9"
+        - "--tp"
+        - "1"
     connectivity:
       # Either "direct" or "tunneled". If tunneled, choose local or reverse.
       mode: tunneled
@@ -59,24 +77,6 @@ deployments:
         HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
       sbatch_extra: []        # free-form extras
 
-    sglang:
-      # args appended to: python3 -m sglang.launch_server
-      model_path: "openai/gpt-oss-20b"
-      venv_path: "/cluster/home/jonalsa/sglang-test/.venv"  # SGLang virtual environment
-      args:
-        - "--host"
-        - "0.0.0.0"
-        - "--port"
-        - "{PORT}"
-        - "--reasoning-parser"
-        - "gpt-oss"
-        - "--context-length"
-        - "64000"
-        - "--mem-fraction-static"
-        - "0.9"
-        - "--tp"
-        - "1"
-
     health:
       path: "/health"
       interval_s: 5
@@ -95,20 +95,27 @@ deployments:
       node_blacklist_cooldown_s: 600
 
   # Example of a smaller deployment with different settings
-  - name: gpt-oss-small
+  - name: tei-bge
     replicas: 1
+    backend:
+      type: tei
+      binary_path: "~/.cargo/bin/text-embeddings-router"  # optional; defaults to PATH
+      model_id: "BAAI/bge-base-en-v1.5"
+      args:
+        - "--hostname"
+        - "0.0.0.0"
+        - "--port"
+        - "{PORT}"
+        - "--json-output"
+      env:
+        HF_TOKEN: "${HF_TOKEN}"
+        HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
+      prometheus_port: 9000
     connectivity:
       mode: direct  # No tunnels needed for this deployment
       orchestrator_host: "router-vm.internal"
       advertise_host: "compute-node"  # Assuming nodes are directly reachable
       local_port_range: [31000, 31999]
-
-    router:
-      base_url: "http://127.0.0.1:30000"
-      auth:
-        type: header
-        header_name: "Authorization"
-        header_value_env: "ROUTER_TOKEN"
 
     slurm:
       prefer: cli
@@ -125,23 +132,6 @@ deployments:
       env:
         HF_HOME: "/cluster/home/jonalsa/.cache/huggingface"
         HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
-
-    sglang:
-      model_path: "openai/gpt-oss-20b"
-      venv_path: "/cluster/home/jonalsa/sglang-test/.venv"  # SGLang virtual environment
-      args:
-        - "--host"
-        - "0.0.0.0"
-        - "--port"
-        - "{PORT}"
-        - "--reasoning-parser"
-        - "gpt-oss"
-        - "--context-length"
-        - "32000"  # Smaller context for testing
-        - "--mem-fraction-static"
-        - "0.8"    # Less memory fraction
-        - "--tp"
-        - "1"
 
     health:
       path: "/health"

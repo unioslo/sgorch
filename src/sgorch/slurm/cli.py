@@ -167,7 +167,7 @@ class SlurmCliAdapter(ISlurm):
         cmd = [
             'squeue',
             '--user', current_user,
-            '--format', '%.18i %.9P %.20j %.8u %.2t %.10M %.6D %R',
+            '--format', '%.18i %.9P %j %.8u %.2t %.10M %.6D %R',
             '--noheader'
         ]
 

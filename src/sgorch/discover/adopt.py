@@ -10,6 +10,7 @@ from ..slurm.base import ISlurm, JobInfo
 from ..router.client import RouterClient
 from ..net.hostaddr import resolve_slurm_node_ip
 from ..net.ports import PortAllocator
+from ..backends import BackendAdapter
 
 
 logger = get_logger(__name__)
@@ -32,9 +33,10 @@ class DiscoveredWorker:
 class WorkerDiscovery:
     """Discovers existing workers for graceful resumption."""
     
-    def __init__(self, deployment_config: DeploymentConfig, slurm: ISlurm):
+    def __init__(self, deployment_config: DeploymentConfig, slurm: ISlurm, backend: BackendAdapter):
         self.config = deployment_config
         self.slurm = slurm
+        self.backend = backend
         self.logger = logger.bind(deployment=deployment_config.name)
     
     def discover_workers(self) -> List[DiscoveredWorker]:
@@ -47,7 +49,7 @@ class WorkerDiscovery:
         self.logger.info("Starting worker discovery")
         
         # Step 1: Get SLURM jobs for this deployment
-        job_prefix = f"sgl-{self.config.name}-"
+        job_prefix = f"{self.backend.job_name_prefix}-{self.config.name}-"
         jobs = self.slurm.list_jobs(job_prefix)
         
         self.logger.info(f"Found {len(jobs)} SLURM jobs with prefix {job_prefix}")
@@ -83,9 +85,11 @@ class WorkerDiscovery:
         log_dir = Path(self.config.slurm.log_dir)
         
         # Look for job output files
+        backend_log_name = Path(self.backend.log_file_path(job.job_id)).name
         log_patterns = [
-            f"sgl-{self.config.name}-*_{job.job_id}.out",  # SLURM output
-            f"server_{job.job_id}.log"  # SGLang server log
+            f"{self.backend.job_name_prefix}-{self.config.name}-*_{job.job_id}.out",
+            backend_log_name,
+            f"server_{job.job_id}.log",
         ]
         
         for pattern in log_patterns:
@@ -94,10 +98,11 @@ class WorkerDiscovery:
             for log_file in log_files:
                 worker = self._parse_log_file(log_file, job)
                 if worker:
-                    # Try to parse instance index from filename: sgl-<name>-<idx>_<jobid>.out
+                    # Try to parse instance index from filename: <prefix>-<name>-<idx>_<jobid>.out
                     try:
                         import re
-                        m = re.match(rf"sgl-{re.escape(self.config.name)}-(\d+)_\d+\.out$", log_file.name)
+                        pattern = rf"{re.escape(self.backend.job_name_prefix)}-{re.escape(self.config.name)}-(\d+)_\d+\.out$"
+                        m = re.match(pattern, log_file.name)
                         if m:
                             worker.instance_idx = int(m.group(1))
                     except Exception:
@@ -179,8 +184,8 @@ class WorkerDiscovery:
     
     def _guess_worker_port(self, job: JobInfo, node_ip: str) -> Optional[int]:
         """Guess the worker port (fallback when logs are unavailable)."""
-        # Try common SGLang ports
-        common_ports = [8000, 8001, 8080, 8888, 30000, 30001]
+        hints = list(self.backend.discovery_port_hints())
+        common_ports = hints if hints else list(range(8000, 8010))
         
         from ..net.hostaddr import test_tcp_connection
         
@@ -189,10 +194,14 @@ class WorkerDiscovery:
                 self.logger.debug(f"Found open port {port} on {node_ip}")
                 return port
         
-        # Try scanning a range (be conservative to avoid being intrusive)
-        for port in range(8000, 8010):
-            if test_tcp_connection(node_ip, port, timeout=1):
-                return port
+        # Try scanning additional ranges (be conservative to avoid being intrusive)
+        fallback_ranges = [range(3000, 3010), range(8000, 8010)]
+        for port_range in fallback_ranges:
+            for port in port_range:
+                if port in common_ports:
+                    continue
+                if test_tcp_connection(node_ip, port, timeout=1):
+                    return port
         
         return None
 
@@ -204,13 +213,15 @@ class AdoptionManager:
         self,
         deployment_config: DeploymentConfig,
         slurm: ISlurm,
-        router_client: RouterClient,
-        port_allocator: PortAllocator
+        router_client: Optional[RouterClient],
+        port_allocator: PortAllocator,
+        backend: BackendAdapter,
     ):
         self.config = deployment_config
         self.slurm = slurm
         self.router_client = router_client
         self.port_allocator = port_allocator
+        self.backend = backend
         self.logger = logger.bind(deployment=deployment_config.name)
     
     def adopt_existing_workers(self) -> Dict[str, DiscoveredWorker]:
@@ -223,7 +234,7 @@ class AdoptionManager:
         self.logger.info("Starting worker adoption")
         
         # Discover workers
-        discovery = WorkerDiscovery(self.config, self.slurm)
+        discovery = WorkerDiscovery(self.config, self.slurm, self.backend)
         discovered_workers = discovery.discover_workers()
         
         if not discovered_workers:
@@ -258,7 +269,7 @@ class AdoptionManager:
                 self.port_allocator.mark_in_use(worker.advertise_port)
             
             # Check if worker is registered with router
-            if worker.worker_url not in router_workers:
+            if router_workers is not None and worker.worker_url not in router_workers:
                 self.logger.info(
                     f"Worker {worker.job_id} not in router, will be handled by reconciler"
                 )
@@ -271,6 +282,8 @@ class AdoptionManager:
     
     def _get_router_workers(self) -> Set[str]:
         """Get current workers registered with the router."""
+        if not self.router_client:
+            return set()
         try:
             return self.router_client.list()
         except Exception as e:
@@ -279,6 +292,9 @@ class AdoptionManager:
     
     def reconcile_router_state(self, adopted_workers: Dict[str, DiscoveredWorker]) -> None:
         """Reconcile router state with adopted workers."""
+        if not self.router_client:
+            return
+
         try:
             router_workers = self._get_router_workers()
             adopted_urls = {w.worker_url for w in adopted_workers.values()}

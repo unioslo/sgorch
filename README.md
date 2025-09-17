@@ -1,22 +1,22 @@
-# SGOrch - SLURM ↔ SGLang Orchestrator
+# SGOrch - SLURM Orchestrator for Text Embedding Backends
 
-SGOrch is a orchestrator that manages SGLang worker deployments on SLURM clusters. It automatically handles job submission, health monitoring, SSH tunneling, router registration, and failure recovery with graceful resumption capabilities.
+SGOrch orchestrates text-generation and text-embedding inference backends—currently [SGLang](https://github.com/sgl-project/sglang) and [Hugging Face Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference)—on SLURM clusters. It automatically handles job submission, health monitoring, optional router registration, SSH tunneling, and failure recovery with graceful resumption capabilities.
 
 ## Architecture Overview
 
 SGOrch follows a microservices-like architecture with clear separation of concerns:
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   SGLang Router │◄──►│     SGOrch       │◄──►│  SLURM Cluster  │
-│                 │    │   Orchestrator   │    │                 │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                              │
-                              ▼
-                    ┌──────────────────┐
-                    │   Prometheus     │
-                    │    Metrics       │
-                    └──────────────────┘
+┌──────────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│  Router (optional)   │◄──►│     SGOrch       │◄──►│  SLURM Cluster  │
+│  (e.g. SGLang router)│    │   Orchestrator   │    │                 │
+└──────────────────────┘    └──────────────────┘    └─────────────────┘
+                               │
+                               ▼
+                     ┌──────────────────┐
+                     │   Prometheus     │
+                     │    Metrics       │
+                     └──────────────────┘
 ```
 
 ### Core Components
@@ -24,7 +24,7 @@ SGOrch follows a microservices-like architecture with clear separation of concer
 - **Orchestrator**: Main process that manages multiple deployments
 - **Reconciler**: Per-deployment controller that maintains desired state
 - **SLURM Adapters**: Interface to SLURM (REST API or CLI)
-- **Router Client**: Manages worker registration with SGLang router
+- **Router Client**: Manages worker registration when the backend exposes a router (SGLang); skipped for routerless backends such as TEI
 - **Health Monitor**: Monitors worker health via HTTP probes
 - **Tunnel Manager**: Creates and supervises SSH tunnels
 - **Port Allocator**: Manages port allocation to avoid conflicts
@@ -33,7 +33,7 @@ SGOrch follows a microservices-like architecture with clear separation of concer
 
 ### Key Features
 
-- **Multi-deployment Management**: Manage multiple SGLang model deployments
+- **Multi-backend Deployments**: Manage SGLang and Hugging Face TEI workers side-by-side
 - **Automatic Scaling**: Maintains desired replica count per deployment  
 - **Health Monitoring**: HTTP health checks with authentication
 - **SSH Tunneling**: Both local (-L) and reverse (-R) tunnel modes
@@ -49,7 +49,7 @@ SGOrch follows a microservices-like architecture with clear separation of concer
 
 - Python 3.10+
 - SLURM cluster access with `squeue`, `sbatch`, `scancel` commands
-- SGLang installed in a virtual environment
+- One or more inference backends installed on the worker nodes (SGLang virtualenv or TEI binary)
 - Network access between orchestrator VM and compute nodes
 - SSH access to compute nodes (for tunneled mode)
 
@@ -69,10 +69,14 @@ uv pip install -e .
 mkdir -p ~/sg-logs
 ```
 
-3. **Set up environment variables**:
+3. **Set up environment variables** (only if required by your backend/router):
 ```bash
+# Required when registering workers with a router
 export ROUTER_TOKEN="your-router-authentication-token"
+# Used by the job health probes
 export WORKER_HEALTH_TOKEN="your-worker-health-token"
+# Optional: Hugging Face access for TEI deployments
+export HF_TOKEN="your-huggingface-token"
 ```
 
 4. **Configure your deployment** (see Configuration section)
@@ -85,77 +89,82 @@ Create a YAML configuration file based on `src/sgorch/examples/config.yaml`:
 orchestrator:
   metrics:
     enabled: true
-    bind: "0.0.0.0" 
+    bind: "0.0.0.0"
     port: 9315
   notifications:
     type: log_only
 
 deployments:
+  # SGLang worker example (router-enabled)
   - name: gpt-oss-20b
     replicas: 2
+    backend:
+      type: sglang
+      model_path: "openai/gpt-oss-20b"
+      venv_path: "/path/to/sglang/.venv"
+      args:
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "{PORT}"
     connectivity:
-      mode: tunneled              # or "direct"
-      tunnel_mode: local          # "local" or "reverse" 
+      mode: tunneled
+      tunnel_mode: local
       orchestrator_host: "vm.example.com"
       advertise_host: "vm.example.com"
       local_port_range: [30000, 30999]
       ssh:
         user: "your-username"
         opts: ["-o", "ServerAliveInterval=15"]
-
     router:
       base_url: "http://router.example.com:8080"
-      endpoints:
-        list: "/workers/list"
-        add: "/workers/add"
-        remove: "/workers/remove"
       auth:
         type: header
         header_name: "Authorization"
         header_value_env: "ROUTER_TOKEN"
-
     slurm:
-      prefer: auto               # rest|cli|auto
+      prefer: auto
       account: "your-account"
-      reservation: "your-reservation"
       partition: "GPUQ"
       gres: "gpu:1"
-      constraint: "h100"
       time_limit: "08:00:00"
       cpus_per_task: 24
       mem: "128G"
       log_dir: "/path/to/logs"
-      env:
-        HF_HOME: "/path/to/hf-cache"
+    health:
+      path: "/health"
+      headers:
+        Authorization: "${WORKER_HEALTH_TOKEN}"
 
-    sglang:
-      model_path: "openai/gpt-oss-20b"
-      venv_path: "/path/to/sglang/.venv"
+  # Hugging Face TEI worker (no router)
+  - name: tei-bge
+    replicas: 1
+    backend:
+      type: tei
+      model_id: "BAAI/bge-base-en-v1.5"
       args:
-        - "--host"
+        - "--hostname"
         - "0.0.0.0"
-        - "--port" 
+        - "--port"
         - "{PORT}"
-        - "--reasoning-parser"
-        - "gpt-oss"
-        - "--context-length"
-        - "64000"
-
+      env:
+        HF_TOKEN: "${HF_TOKEN}"
+    connectivity:
+      mode: direct
+      tunnel_mode: local
+      orchestrator_host: "vm.example.com"
+      advertise_host: "tei.example.com"
+      local_port_range: [31000, 31999]
+    slurm:
+      prefer: cli
+      account: "your-account"
+      partition: "GPUQ"
+      gres: "gpu:1"
+      log_dir: "/path/to/logs"
     health:
       path: "/health"
       interval_s: 5
       timeout_s: 3
-      consecutive_ok_for_ready: 2
-      failures_to_unhealthy: 3
-      headers:
-        Authorization: "${WORKER_HEALTH_TOKEN}"
-
-    policy:
-      restart_backoff_s: 60
-      deregister_grace_s: 10
-      start_grace_period_s: 600
-      predrain_seconds_before_walltime: 180
-      node_blacklist_cooldown_s: 600
 ```
 
 ### Configuration Sections

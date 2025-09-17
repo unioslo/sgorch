@@ -1,5 +1,7 @@
 from typing import Dict, Any, Optional
 
+from ..backends.base import LaunchPlan
+
 
 def render_sbatch_script(
     deploy_name: str,
@@ -11,29 +13,27 @@ def render_sbatch_script(
     cpus: int,
     mem: str,
     time_limit: str,
+    job_name_prefix: str,
+    display_name: str,
+    launch_plan: LaunchPlan,
+    log_dir: str = "/tmp",
     reservation: Optional[str] = None,
     qos: Optional[str] = None,
     constraint: Optional[str] = None,
-    log_dir: str = "/tmp",
     env_vars: Optional[Dict[str, str]] = None,
-    model_path: str = "",
     remote_port: int = 8000,
-    sglang_args: Optional[list[str]] = None,
     health_path: str = "/health",
     health_token_env: str = "WORKER_HEALTH_TOKEN",
-    sglang_venv_path: Optional[str] = None,
     sbatch_extra: Optional[list[str]] = None,
 ) -> str:
     """Render SLURM sbatch script template."""
-    
+
     env_vars = env_vars or {}
-    sglang_args = sglang_args or []
     sbatch_extra = sbatch_extra or []
-    
-    # Build sbatch header
+
     script_lines = [
         "#!/usr/bin/env bash",
-        f"#SBATCH --job-name=sgl-{deploy_name}-{instance_idx}",
+        f"#SBATCH --job-name={job_name_prefix}-{deploy_name}-{instance_idx}",
         f"#SBATCH --account={account}",
         f"#SBATCH --partition={partition}",
         f"#SBATCH --gres={gres}",
@@ -41,54 +41,47 @@ def render_sbatch_script(
         f"#SBATCH --mem={mem}",
         f"#SBATCH --time={time_limit}",
     ]
-    
-    # Optional SBATCH directives
+
     if reservation:
         script_lines.append(f"#SBATCH --reservation={reservation}")
     if qos:
         script_lines.append(f"#SBATCH --qos={qos}")
     if constraint:
         script_lines.append(f"#SBATCH --constraint={constraint}")
-    
-    # Logs and metadata
+
     script_lines.extend([
         f"#SBATCH -o {log_dir}/%x_%j.out",
         f"#SBATCH -e {log_dir}/%x_%j.err",
         f"#SBATCH --comment=sgorch:{deploy_name}:{instance_uuid}",
     ])
-    
-    # Add any extra sbatch directives
+
     for extra in sbatch_extra:
         if extra.strip():
             script_lines.append(f"#SBATCH {extra}")
-    
+
     script_lines.extend([
         "",
-        "set -eo pipefail",  # Remove -u flag to allow unbound variables
+        "set -eo pipefail",
     ])
-    
-    # Environment variables
+
     for key, value in env_vars.items():
         script_lines.append(f"export {key}={value}")
-    
-    # Add health token if available
+    for key, value in launch_plan.extra_env.items():
+        script_lines.append(f"export {key}={value}")
+
     script_lines.append(f"export {health_token_env}=${{{health_token_env}:-}}")
     script_lines.append(f"PORT={remote_port}")
     script_lines.append("")
-    
-    # Activation logic
+
     script_lines.extend([
-        "# Activate environment", 
-        "set +u",  # Temporarily disable unbound variable check
+        "# Activate environment",
+        "set +u",
         "source ~/.bashrc || true",
-        "set -u",  # Re-enable unbound variable check
+        "set -u",
     ])
-    
-    if sglang_venv_path:
-        script_lines.append(f"source {sglang_venv_path}/bin/activate || true")
-    else:
-        script_lines.append("source /cluster/home/jonalsa/sglang-test/.venv/bin/activate || conda activate sglang || source .venv/bin/activate || true")
-    
+
+    script_lines.extend(launch_plan.setup_lines)
+
     script_lines.extend([
         "",
         "# Get node hostname and IP",
@@ -96,38 +89,28 @@ def render_sbatch_script(
         'IP=$(getent hosts "$HOSTNAME" | awk \'{print $1}\' | head -n1)',
         "",
     ])
-    
-    # Build sglang command
-    sglang_cmd = ["python3 -m sglang.launch_server"]
-    sglang_cmd.append(f"--model-path {model_path}")
-    
-    # Process args, replacing {PORT} template
-    processed_args = []
-    for arg in sglang_args:
-        if arg == "{PORT}":
-            processed_args.append("$PORT")
-        else:
-            processed_args.append(arg.replace("{PORT}", "$PORT"))
-    sglang_cmd.extend(processed_args)
-    
-    # Add default host and port if not in args
-    if "--host" not in processed_args:
-        sglang_cmd.extend(["--host", "0.0.0.0"])
-    if "--port" not in processed_args:
-        sglang_cmd.extend(["--port", f"{remote_port}"])
-    
-    # Launch sglang server
-    server_log = f"{log_dir}/sglang_{deploy_name}_$SLURM_JOB_ID.log"
+
+    if not launch_plan.command:
+        raise ValueError("Backend launch command must not be empty")
+
+    command_display = " ".join(launch_plan.command)
+    server_log = f"{log_dir}/{launch_plan.log_file_name}"
+
     script_lines.extend([
-        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting SGLang server on $HOSTNAME:$PORT...\"",
-        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Command: {' '.join(sglang_cmd)}\" | tee {server_log}",
+        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Starting {display_name} worker on $HOSTNAME:$PORT...\"",
+        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Command: {command_display}\" | tee {server_log}",
         f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Logs: {server_log}\"",
         "",
-        " \\\n  ".join(sglang_cmd) + " \\",
-        f"  >> {server_log} 2>&1 &",
+    ])
+
+    command_block = " \\\n  ".join(launch_plan.command)
+    script_lines.append(command_block + " \\")
+    script_lines.append(f"  >> {server_log} 2>&1 &")
+
+    script_lines.extend([
         "",
         "PID=$!",
-        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] SGLang server started with PID $PID\"",
+        f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] {display_name} worker started with PID $PID\"",
         f"echo \"[$(date '+%Y-%m-%d %H:%M:%S')] Monitor logs: tail -f {server_log}\"",
         "",
         "# Emit a single-line READY marker for adoption on restart:",
@@ -146,7 +129,7 @@ def render_sbatch_script(
         "",
         "wait $PID",
     ])
-    
+
     return "\n".join(script_lines)
 
 
@@ -167,8 +150,7 @@ def render_simple_script_template(template_vars: dict[str, Any]) -> str:
 
 {script_body}
 """
-    
-    # Build optional directives
+
     optional = []
     if template_vars.get("reservation"):
         optional.append(f"#SBATCH --reservation={template_vars['reservation']}")
@@ -176,7 +158,7 @@ def render_simple_script_template(template_vars: dict[str, Any]) -> str:
         optional.append(f"#SBATCH --qos={template_vars['qos']}")
     if template_vars.get("constraint"):
         optional.append(f"#SBATCH --constraint={template_vars['constraint']}")
-    
+
     template_vars["optional_directives"] = "\n".join(optional)
-    
+
     return template.format(**template_vars)

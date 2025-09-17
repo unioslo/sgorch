@@ -123,7 +123,7 @@ class HealthProbe:
             return result
             
         except httpx.ConnectError:
-            error_msg = f"Connection refused - SGLang likely still starting"
+            error_msg = f"Connection refused - backend likely still starting"
             logger.info(f"Health check CONNECTION FAILED for {self.worker_url}: {error_msg}")
             result = HealthResult(
                 status=HealthStatus.UNHEALTHY,
