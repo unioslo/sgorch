@@ -42,6 +42,7 @@ SGOrch follows a microservices-like architecture with clear separation of concer
 - **Prometheus Metrics**: Comprehensive monitoring and alerting
 - **Structured Logging**: JSON logs for observability
 - **Production Ready**: Systemd integration, signal handling, graceful shutdown
+- **Router Service**: Optional FastAPI proxy that load balances and retries requests for routerless backends (see [docs/ROUTER.md](docs/ROUTER.md))
 
 ## Installation
 

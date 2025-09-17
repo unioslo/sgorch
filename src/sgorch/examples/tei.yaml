@@ -37,6 +37,10 @@ deployments:
         user: "jonalsa"
         opts: ["-o", "ServerAliveInterval=15", "-o", "ExitOnForwardFailure=yes"]
 
+    # Optional: register replicas with the standalone SGOrch router (start via `sgorch router --port 25000`)
+    router:
+      base_url: "http://127.0.0.1:25000"
+
     slurm:
       prefer: cli
       account: "chatgpt"

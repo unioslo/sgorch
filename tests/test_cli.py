@@ -47,3 +47,7 @@ def test_run_missing_config_exits_1(tmp_path):
     r = CliRunner().invoke(app, ["run", "-c", str(missing)])
     assert r.exit_code != 0
 
+
+def test_router_cli_rejects_invalid_retry():
+    r = CliRunner().invoke(app, ["router", "--max-retries", "0"])
+    assert r.exit_code != 0

@@ -127,7 +127,7 @@ class TEIBackendAdapter(BackendAdapter):
 
     @property
     def requires_router(self) -> bool:
-        return False
+        return self.deployment.router is not None
 
     def validate_worker_metrics(self) -> None:
         cfg = self.deployment
