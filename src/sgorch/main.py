@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import asyncio
 import os
 import signal
 import sys
@@ -7,10 +8,12 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+import uvicorn
 
 from .logging_setup import setup_logging, get_logger
 from .config import load_config
 from .orchestrator import Orchestrator
+from .router.runtime import RouterRuntime, RouterRuntimeConfig, create_router_app
 
 
 app = typer.Typer(
@@ -222,6 +225,65 @@ def adopt(
         
     except Exception as e:
         logger.error(f"Adoption failed: {e}")
+        raise typer.Exit(1)
+
+
+@app.command()
+def router(
+    host: str = typer.Option("0.0.0.0", "--host", help="Router bind host"),
+    port: int = typer.Option(8080, "--port", "-p", help="Router bind port"),
+    health_path: str = typer.Option("/health", "--health-path", help="Worker health-check path"),
+    probe_interval: float = typer.Option(10.0, "--probe-interval", help="Seconds between health probes"),
+    probe_timeout: float = typer.Option(5.0, "--probe-timeout", help="Health probe timeout in seconds"),
+    request_timeout: float = typer.Option(30.0, "--request-timeout", help="Upstream request timeout in seconds"),
+    max_retries: int = typer.Option(3, "--max-retries", help="Maximum proxy attempts before failing"),
+    failure_cooldown: float = typer.Option(5.0, "--failure-cooldown", help="Cooldown seconds before retrying an unhealthy worker"),
+    log_level: str = typer.Option("INFO", "--log-level", "-l", help="Log level (DEBUG, INFO, WARNING, ERROR)"),
+):
+    """Run the standalone proxy router service."""
+
+    setup_logging(log_level.upper())
+    logger = get_logger(__name__)
+
+    if max_retries < 1:
+        logger.error("max_retries must be at least 1")
+        raise typer.Exit(1)
+
+    runtime_config = RouterRuntimeConfig(
+        bind_host=host,
+        bind_port=port,
+        health_path=health_path,
+        probe_interval_s=probe_interval,
+        probe_timeout_s=probe_timeout,
+        request_timeout_s=request_timeout,
+        max_retries=max_retries,
+        failure_cooldown_s=failure_cooldown,
+    )
+
+    runtime = RouterRuntime(runtime_config)
+    app_instance = create_router_app(runtime)
+
+    uv_config = uvicorn.Config(
+        app_instance,
+        host=runtime_config.bind_host,
+        port=runtime_config.bind_port,
+        log_level=log_level.lower(),
+        log_config=None,
+    )
+    server = uvicorn.Server(uv_config)
+
+    async def _serve() -> None:
+        try:
+            await server.serve()
+        finally:
+            await runtime.stop()
+
+    try:
+        asyncio.run(_serve())
+    except KeyboardInterrupt:
+        logger.info("Router interrupted, shutting down")
+    except Exception as e:
+        logger.error(f"Router exited with error: {e}")
         raise typer.Exit(1)
 
 

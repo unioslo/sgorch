@@ -144,3 +144,38 @@ def test_config_supports_tei_backend_without_router(tmp_path):
     assert dep.backend.type == "tei"
     assert dep.router is None
     assert dep.tei.model_id == "model"
+
+
+def test_config_supports_tei_backend_with_router(tmp_path):
+    cfg = write(
+        tmp_path,
+        "cfg.yaml",
+        """
+        deployments:
+          - name: tei
+            replicas: 1
+            connectivity:
+              mode: direct
+              tunnel_mode: local
+              orchestrator_host: host
+              advertise_host: 127.0.0.1
+            router:
+              base_url: http://router:25000
+            slurm:
+              prefer: cli
+              account: acct
+              partition: part
+              gres: gpu:1
+              log_dir: {tmp}
+            backend:
+              type: tei
+              model_id: model
+              args: ["--hostname", "0.0.0.0"]
+        """.format(tmp=str(tmp_path)),
+    )
+
+    conf = load_config(cfg)
+    dep = conf.deployments[0]
+    assert dep.backend.type == "tei"
+    assert dep.router is not None
+    assert dep.router.base_url == "http://router:25000"
