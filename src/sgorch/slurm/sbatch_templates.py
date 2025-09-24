@@ -79,7 +79,7 @@ def render_sbatch_script(
     for key, value in combined_env.items():
         script_lines.append(f"export {key}={shlex.quote(value)}")
 
-    health_token_value = os.getenv(health_token_env)
+    health_token_value = _resolve_env_value(os.getenv(health_token_env))
     if health_token_value:
         script_lines.append(f"export {health_token_env}={shlex.quote(health_token_value)}")
     script_lines.append(f"PORT={remote_port}")
@@ -180,8 +180,22 @@ def _resolve_env_value(value: Any) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, str):
-        if value.startswith("${") and value.endswith("}"):
-            env_name = value[2:-1]
-            return os.getenv(env_name)
+        trimmed = value.strip()
+        if trimmed == "":
+            return None
+        if trimmed.startswith("${") and trimmed.endswith("}"):
+            env_name = trimmed[2:-1]
+            env_val = os.getenv(env_name)
+            if env_val is None:
+                return None
+            env_val = env_val.strip()
+            if env_val == "" or (env_val.startswith("${") and env_val.endswith("}")):
+                return None
+            return env_val
+        if trimmed.startswith("$") and "${" in trimmed and trimmed.endswith("}"):
+            # Something like ${{VAR}}; treat as unresolved placeholder
+            return None
         return value
-    return str(value)
+
+    resolved = str(value).strip()
+    return resolved or None
