@@ -1,3 +1,5 @@
+import os
+import shlex
 from typing import Dict, Any, Optional
 
 from ..backends.base import LaunchPlan
@@ -64,12 +66,22 @@ def render_sbatch_script(
         "set -eo pipefail",
     ])
 
-    for key, value in env_vars.items():
-        script_lines.append(f"export {key}={value}")
-    for key, value in launch_plan.extra_env.items():
-        script_lines.append(f"export {key}={value}")
+    combined_env: Dict[str, str] = {}
+    for source in (env_vars, launch_plan.extra_env):
+        if not source:
+            continue
+        for key, value in source.items():
+            resolved = _resolve_env_value(value)
+            if resolved is None:
+                continue
+            combined_env[key] = resolved
 
-    script_lines.append(f"export {health_token_env}=${{{health_token_env}:-}}")
+    for key, value in combined_env.items():
+        script_lines.append(f"export {key}={shlex.quote(value)}")
+
+    health_token_value = os.getenv(health_token_env)
+    if health_token_value:
+        script_lines.append(f"export {health_token_env}={shlex.quote(health_token_value)}")
     script_lines.append(f"PORT={remote_port}")
     script_lines.append("")
 
@@ -162,3 +174,14 @@ def render_simple_script_template(template_vars: dict[str, Any]) -> str:
     template_vars["optional_directives"] = "\n".join(optional)
 
     return template.format(**template_vars)
+
+
+def _resolve_env_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value.startswith("${") and value.endswith("}"):
+            env_name = value[2:-1]
+            return os.getenv(env_name)
+        return value
+    return str(value)
