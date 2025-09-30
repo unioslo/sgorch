@@ -13,6 +13,7 @@ orchestrator:
 deployments:
   - name: tei-multilingual
     replicas: 2
+    enable_worker_metrics: true
     backend:
       type: tei
       binary_path: "~/.cargo/bin/text-embeddings-router"  # optional; defaults to PATH

@@ -1,6 +1,7 @@
 import time
 import uuid
 from typing import Dict, Set, Optional
+from urllib.parse import urlparse
 from dataclasses import dataclass
 
 from .logging_setup import get_logger
@@ -32,8 +33,10 @@ class WorkerState:
     node: Optional[str] = None
     remote_port: Optional[int] = None
     advertise_port: Optional[int] = None
+    metrics_advertise_port: Optional[int] = None
     worker_url: Optional[str] = None
     advertised_url: Optional[str] = None
+    metrics_url: Optional[str] = None
     health_status: HealthStatus = HealthStatus.UNKNOWN
     last_seen: Optional[float] = None
     submitted_at: float = 0
@@ -312,13 +315,35 @@ class Reconciler:
     
     def _can_start_worker(self) -> bool:
         """Check if we can start a new worker."""
-        # Check if we have available ports
-        if self.port_allocator.get_available_count() < 2:
-            self.logger.warning("No available ports for new worker")
+        needed_ports = self._ports_required_for_new_worker()
+        if self.port_allocator.get_available_count() < needed_ports:
+            self.logger.warning(
+                f"Insufficient free ports for new worker (needed={needed_ports})"
+            )
             return False
-        
+
         # Add other checks as needed (quotas, etc.)
         return True
+
+    def _ports_required_for_new_worker(self) -> int:
+        """Determine how many unique port allocations a new worker needs."""
+        count = 1  # Remote service port provided via $PORT
+
+        if self.config.connectivity.mode == "tunneled":
+            # Additional port for the user-facing tunnel endpoint
+            count += 1
+
+        metrics_needed = (
+            self.config.enable_worker_metrics
+            and self.config.backend.type == "tei"
+            and self.config.connectivity.mode == "tunneled"
+            and self.config.tei.prometheus_port is not None
+        )
+        if metrics_needed:
+            # Dedicated tunnel for the TEI Prometheus endpoint
+            count += 1
+
+        return count
     
     def _start_worker(self) -> None:
         """Start a new worker."""
@@ -330,13 +355,23 @@ class Reconciler:
             # Allocate ports
             remote_port = self.port_allocator.allocate_port()
             advertise_port = remote_port  # For direct mode
-            
+            metrics_advertise_port: Optional[int] = None
+
             if self.config.connectivity.mode == "tunneled":
                 advertise_port = self.port_allocator.allocate_port()
-            
+
+            metrics_tunnel_required = (
+                self.config.enable_worker_metrics
+                and getattr(self.config.backend, "type", None) == "tei"
+                and self.config.connectivity.mode == "tunneled"
+                and self.config.tei.prometheus_port is not None
+            )
+            if metrics_tunnel_required:
+                metrics_advertise_port = self.port_allocator.allocate_port()
+
             # Create SLURM job specification
             spec = self._create_job_spec(instance_idx, instance_uuid, remote_port)
-            
+
             # Submit job
             job_id = self.slurm.submit(spec)
             
@@ -347,9 +382,10 @@ class Reconciler:
                 instance_idx=instance_idx,
                 remote_port=remote_port,
                 advertise_port=advertise_port,
+                metrics_advertise_port=metrics_advertise_port,
                 submitted_at=time.time()
             )
-            
+
             self.workers[job_id] = worker
             
             # Log where to find backend logs
@@ -366,6 +402,8 @@ class Reconciler:
                 self.port_allocator.release_port(remote_port)
             if 'advertise_port' in locals() and advertise_port != remote_port:
                 self.port_allocator.release_port(advertise_port)
+            if 'metrics_advertise_port' in locals() and metrics_advertise_port:
+                self.port_allocator.release_port(metrics_advertise_port)
     
     def _create_job_spec(self, instance_idx: int, instance_uuid: str, remote_port: int) -> SubmitSpec:
         """Create SLURM job specification."""
@@ -397,7 +435,7 @@ class Reconciler:
         effective_time_limit = _seconds_to_hms(base_seconds + instance_idx * stagger)
         
         # Validate backend-specific worker metrics requirements
-        if getattr(self.config, "enable_worker_metrics", False):
+        if self.config.enable_worker_metrics:
             self.backend.validate_worker_metrics()
 
         launch_plan = self.backend.build_launch_plan(
@@ -507,8 +545,10 @@ class Reconciler:
                     if worker.worker_url not in self.health_monitor.probes:
                         self.health_monitor.add_worker(worker.worker_url, self.config.health)
                         self.logger.info(f"Started health monitoring for worker: {worker.worker_url}")
+                # Ensure metrics endpoint (handles cleanup when disabled)
+                self._ensure_worker_metrics_endpoint(worker)
             return
-        
+
         for worker in self.workers.values():
             if not worker.node or not worker.remote_port or not worker.advertise_port:
                 continue
@@ -538,7 +578,92 @@ class Reconciler:
                 if worker.worker_url not in self.health_monitor.probes:
                     self.health_monitor.add_worker(worker.worker_url, self.config.health)
                     self.logger.info(f"Started health monitoring for worker: {worker.worker_url}")
-    
+
+            # Ensure metrics endpoint (may create secondary tunnel for TEI)
+            self._ensure_worker_metrics_endpoint(worker)
+
+    def _ensure_worker_metrics_endpoint(self, worker: WorkerState) -> None:
+        """Ensure worker.metrics_url reflects the active backend configuration."""
+        if not self.config.enable_worker_metrics:
+            self._teardown_worker_metrics(worker)
+            return
+
+        backend_type = getattr(self.config.backend, "type", None)
+
+        if backend_type == "sglang":
+            # SGLang exposes /metrics on the primary worker endpoint
+            worker.metrics_url = worker.worker_url
+            return
+
+        if backend_type != "tei":
+            # Unknown backend – skip metrics integration
+            worker.metrics_url = None
+            return
+
+        tei_cfg = self.config.tei
+        if not tei_cfg.prometheus_port:
+            # Configuration missing the Prometheus port requirement
+            self._teardown_worker_metrics(worker)
+            return
+
+        if self.config.connectivity.mode == "tunneled":
+            # Ensure a dedicated tunnel to the TEI Prometheus endpoint
+            if not worker.node:
+                return
+
+            try:
+                if worker.metrics_advertise_port is None:
+                    worker.metrics_advertise_port = self.port_allocator.allocate_port()
+
+                spec = TunnelSpec(
+                    mode=self.config.connectivity.tunnel_mode,
+                    orchestrator_host=self.config.connectivity.orchestrator_host,
+                    advertise_host=self.config.connectivity.advertise_host,
+                    advertise_port=worker.metrics_advertise_port,
+                    remote_host=worker.node,
+                    remote_port=tei_cfg.prometheus_port,
+                    ssh_user=self.config.connectivity.ssh.user,
+                    ssh_opts=self.config.connectivity.ssh.opts,
+                )
+                metrics_key = self._metrics_tunnel_key(worker)
+                advertised_url = self.tunnel_manager.ensure(metrics_key, spec)
+                worker.metrics_url = advertised_url
+            except Exception as exc:
+                self.logger.debug(
+                    f"Failed to establish metrics tunnel for worker {worker.job_id}: {exc}"
+                )
+                self._release_metrics_tunnel(worker)
+                worker.metrics_url = None
+        else:
+            # Direct connectivity – tear down any tunnels and point to node:prom_port
+            self._release_metrics_tunnel(worker)
+
+            host = None
+            if worker.worker_url:
+                parsed = urlparse(worker.worker_url)
+                host = parsed.hostname
+            if not host and worker.node:
+                host = worker.node
+            if not host:
+                return
+
+            worker.metrics_url = f"http://{host}:{tei_cfg.prometheus_port}"
+
+    def _metrics_tunnel_key(self, worker: WorkerState) -> str:
+        return f"{self.config.name}:{worker.job_id}:metrics"
+
+    def _release_metrics_tunnel(self, worker: WorkerState) -> None:
+        if worker.metrics_advertise_port:
+            self.port_allocator.release_port(worker.metrics_advertise_port)
+            worker.metrics_advertise_port = None
+
+        metrics_key = self._metrics_tunnel_key(worker)
+        self.tunnel_manager.drop(metrics_key)
+
+    def _teardown_worker_metrics(self, worker: WorkerState) -> None:
+        self._release_metrics_tunnel(worker)
+        worker.metrics_url = None
+
     def _reconcile_router(self) -> None:
         """Reconcile router registrations."""
         if not self.router_client:
@@ -667,6 +792,9 @@ class Reconciler:
         # Clean up tunnels
         tunnel_key = f"{self.config.name}:{job_id}"
         self.tunnel_manager.drop(tunnel_key)
+
+        # Clean up worker metrics resources (tunnels/ports)
+        self._teardown_worker_metrics(worker)
         
         # Release ports
         if worker.remote_port:
@@ -706,14 +834,20 @@ class Reconciler:
         self.metrics.update_blacklisted_nodes(self.config.name, blacklisted_nodes)
 
         # Update worker metrics proxy endpoints if enabled
+        metrics_enabled = self.config.enable_worker_metrics
         endpoints: list[str] = []
-        for w in self.workers.values():
-            if w.worker_url:
-                endpoints.append(w.worker_url)
+        if metrics_enabled:
+            for w in self.workers.values():
+                if w.metrics_url:
+                    endpoints.append(w.metrics_url)
+                elif w.worker_url and getattr(self.config.backend, "type", None) == "sglang":
+                    # Defensive fallback: legacy SGLang workers may not have metrics_url populated yet
+                    endpoints.append(w.worker_url)
+
         self.metrics.set_worker_metrics_endpoints(
             self.config.name,
             endpoints,
-            enabled=getattr(self.config, "enable_worker_metrics", False)
+            enabled=metrics_enabled
         )
     
     def shutdown(self) -> None:
