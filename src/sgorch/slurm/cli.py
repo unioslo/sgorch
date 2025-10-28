@@ -190,7 +190,7 @@ class SlurmCliAdapter(ISlurm):
                 message = (result.stderr or result.stdout or "").strip() or "squeue failed"
                 logger.error(f"squeue failed: {message}")
                 self._check_slurm_unavailable(message)
-                raise SlurmUnavailableError(message)
+                raise RuntimeError(message)
 
             # Client-side filter by job name (3rd column, index 2)
             filtered_lines: list[str] = []
