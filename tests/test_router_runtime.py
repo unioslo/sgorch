@@ -2,6 +2,7 @@ import asyncio
 from typing import List, Tuple
 import httpx
 import pytest
+from prometheus_client import CollectorRegistry
 
 from sgorch.router.runtime import (
     RouterRuntime,
@@ -9,6 +10,7 @@ from sgorch.router.runtime import (
     WorkerStatus,
     create_router_app,
 )
+from sgorch.router.metrics import RouterMetrics
 
 
 def test_router_add_list_remove(tmp_path):
@@ -51,6 +53,48 @@ async def _run_router_add_list_remove(tmp_path):
             assert resp.json()["workers"] == []
 
         await runtime.stop()
+
+
+def test_router_metrics_update_without_server():
+    asyncio.run(_run_router_metrics_update())
+
+
+async def _run_router_metrics_update():
+    registry = CollectorRegistry()
+    metrics = RouterMetrics(router_name="unit-test", registry=registry)
+    runtime = RouterRuntime(RouterRuntimeConfig(probe_interval_s=0.1, failure_cooldown_s=0.1), metrics=metrics)
+
+    await runtime.add_worker("http://worker-a:8000")
+    await runtime.record_success("http://worker-a:8000")
+    await runtime.record_failure("http://worker-a:8000")
+    await runtime.remove_worker("http://worker-a:8000")
+
+    labels_unknown = {"router": "unit-test", "status": "unknown"}
+    labels_healthy = {"router": "unit-test", "status": "healthy"}
+    labels_unhealthy = {"router": "unit-test", "status": "unhealthy"}
+
+    assert registry.get_sample_value("sgorch_router_workers", labels_unknown) == 0.0
+    assert registry.get_sample_value("sgorch_router_workers", labels_healthy) == 0.0
+    assert registry.get_sample_value("sgorch_router_workers", labels_unhealthy) == 0.0
+
+    state_labels_unknown = {
+        "router": "unit-test",
+        "worker": "http://worker-a:8000",
+        "status": "unknown",
+    }
+    state_labels_healthy = dict(state_labels_unknown)
+    state_labels_healthy["status"] = "healthy"
+    state_labels_unhealthy = dict(state_labels_unknown)
+    state_labels_unhealthy["status"] = "unhealthy"
+
+    assert registry.get_sample_value("sgorch_router_worker_state_changes_total", state_labels_unknown) == 1.0
+    assert registry.get_sample_value("sgorch_router_worker_state_changes_total", state_labels_healthy) == 1.0
+    assert registry.get_sample_value("sgorch_router_worker_state_changes_total", state_labels_unhealthy) == 1.0
+
+    registration_labels_add = {"router": "unit-test", "action": "add"}
+    registration_labels_remove = {"router": "unit-test", "action": "remove"}
+    assert registry.get_sample_value("sgorch_router_workers_registered_total", registration_labels_add) == 1.0
+    assert registry.get_sample_value("sgorch_router_workers_registered_total", registration_labels_remove) == 1.0
 
 
 @pytest.mark.usefixtures("seed_random")

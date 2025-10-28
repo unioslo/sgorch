@@ -238,6 +238,16 @@ def router(
     request_timeout: float = typer.Option(30.0, "--request-timeout", help="Upstream request timeout in seconds"),
     max_retries: int = typer.Option(3, "--max-retries", help="Maximum proxy attempts before failing"),
     failure_cooldown: float = typer.Option(5.0, "--failure-cooldown", help="Cooldown seconds before retrying an unhealthy worker"),
+    prometheus_port: Optional[int] = typer.Option(
+        None,
+        "--prometheus-port",
+        help="Expose Prometheus metrics on the given port"
+    ),
+    router_name: Optional[str] = typer.Option(
+        None,
+        "--router-name",
+        help="Optional router name label to attach to Prometheus metrics"
+    ),
     log_level: str = typer.Option("INFO", "--log-level", "-l", help="Log level (DEBUG, INFO, WARNING, ERROR)"),
 ):
     """Run the standalone proxy router service."""
@@ -249,6 +259,10 @@ def router(
         logger.error("max_retries must be at least 1")
         raise typer.Exit(1)
 
+    if prometheus_port is not None and prometheus_port <= 0:
+        logger.error("prometheus_port must be a positive integer")
+        raise typer.Exit(1)
+
     runtime_config = RouterRuntimeConfig(
         bind_host=host,
         bind_port=port,
@@ -258,6 +272,9 @@ def router(
         request_timeout_s=request_timeout,
         max_retries=max_retries,
         failure_cooldown_s=failure_cooldown,
+        prometheus_port=prometheus_port,
+        prometheus_host=host if prometheus_port is not None else None,
+        router_name=router_name,
     )
 
     runtime = RouterRuntime(runtime_config)

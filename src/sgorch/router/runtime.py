@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from time import perf_counter
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Iterable, Optional, Set
@@ -13,6 +14,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from ..logging_setup import get_logger
+from .metrics import RouterMetrics
 
 
 logger = get_logger(__name__)
@@ -45,6 +47,9 @@ class RouterRuntimeConfig:
     request_timeout_s: float = 30.0
     max_retries: int = 3
     failure_cooldown_s: float = 5.0
+    prometheus_port: Optional[int] = None
+    prometheus_host: Optional[str] = None
+    router_name: Optional[str] = None
 
     def normalized_health_path(self) -> str:
         path = self.health_path or "/health"
@@ -64,6 +69,7 @@ class RouterRuntime:
         *,
         proxy_client: Optional[httpx.AsyncClient] = None,
         health_client: Optional[httpx.AsyncClient] = None,
+        metrics: Optional[RouterMetrics] = None,
     ) -> None:
         self.config = config
         self._workers: Dict[str, WorkerEntry] = {}
@@ -74,6 +80,12 @@ class RouterRuntime:
         self._health_client = health_client
         self._owns_proxy_client = proxy_client is None
         self._owns_health_client = health_client is None
+        if metrics is not None:
+            self._metrics = metrics
+        elif config.prometheus_port is not None:
+            self._metrics = RouterMetrics(router_name=config.router_name)
+        else:
+            self._metrics = None
 
     async def start(self) -> None:
         if self._running:
@@ -83,8 +95,14 @@ class RouterRuntime:
             self._proxy_client = httpx.AsyncClient(timeout=self.config.request_timeout_s)
         if self._health_client is None:
             self._health_client = httpx.AsyncClient(timeout=self.config.probe_timeout_s)
+        if self._metrics and self.config.prometheus_port is not None:
+            host = self.config.prometheus_host or self.config.bind_host
+            self._metrics.start_http_server(host, self.config.prometheus_port)
         self._running = True
         self._health_task = asyncio.create_task(self._health_loop(), name="router-health-loop")
+        if self._metrics:
+            async with self._lock:
+                self._update_worker_metrics_locked()
 
     async def stop(self) -> None:
         if not self._running:
@@ -117,13 +135,21 @@ class RouterRuntime:
         async with self._lock:
             entry = self._workers.get(normalized)
             if entry:
+                previous_status = entry.status
                 entry.status = WorkerStatus.UNKNOWN
                 entry.next_check = 0.0
                 entry.fail_count = 0
                 logger.info(f"Worker already registered, resetting state: {normalized}")
+                if self._metrics and previous_status != WorkerStatus.UNKNOWN:
+                    self._metrics.record_worker_state(normalized, WorkerStatus.UNKNOWN.value)
             else:
                 self._workers[normalized] = WorkerEntry(url=normalized)
                 logger.info(f"Registered new worker: {normalized}")
+                if self._metrics:
+                    self._metrics.record_worker_state(normalized, WorkerStatus.UNKNOWN.value)
+            if self._metrics:
+                self._metrics.record_worker_registration("add")
+            self._update_worker_metrics_locked()
 
     async def remove_worker(self, url: str) -> None:
         normalized = url.strip().rstrip("/")
@@ -131,6 +157,9 @@ class RouterRuntime:
             if normalized in self._workers:
                 self._workers.pop(normalized, None)
                 logger.info(f"Removed worker: {normalized}")
+                if self._metrics:
+                    self._metrics.record_worker_registration("remove")
+                self._update_worker_metrics_locked()
 
     async def choose_worker(self, *, exclude: Iterable[str] = ()) -> Optional[WorkerEntry]:
         excluded = {u.rstrip("/") for u in exclude}
@@ -157,11 +186,15 @@ class RouterRuntime:
             entry = self._workers.get(normalized)
             if not entry:
                 return
+            previous_status = entry.status
             entry.status = WorkerStatus.HEALTHY
             entry.fail_count = 0
             entry.success_count += 1
             entry.last_checked = now
             entry.next_check = now + self.config.probe_interval_s
+            if self._metrics and previous_status != WorkerStatus.HEALTHY:
+                self._metrics.record_worker_state(normalized, WorkerStatus.HEALTHY.value)
+            self._update_worker_metrics_locked()
 
     async def record_failure(self, url: str, *, reason: str | None = None) -> None:
         normalized = url.rstrip("/")
@@ -170,15 +203,27 @@ class RouterRuntime:
             entry = self._workers.get(normalized)
             if not entry:
                 return
+            previous_status = entry.status
             entry.status = WorkerStatus.UNHEALTHY
             entry.fail_count += 1
             entry.last_checked = now
             entry.last_failure = now
             entry.next_check = now + self.config.failure_cooldown_s
+            if self._metrics and previous_status != WorkerStatus.UNHEALTHY:
+                self._metrics.record_worker_state(normalized, WorkerStatus.UNHEALTHY.value)
+            self._update_worker_metrics_locked()
         if reason:
             logger.warning(f"Worker marked unhealthy {normalized}: {reason}")
         else:
             logger.warning(f"Worker marked unhealthy {normalized}")
+
+    def _update_worker_metrics_locked(self) -> None:
+        if not self._metrics:
+            return
+        counts: Dict[str, int] = {status.value: 0 for status in WorkerStatus}
+        for entry in self._workers.values():
+            counts[entry.status.value] = counts.get(entry.status.value, 0) + 1
+        self._metrics.update_worker_counts(counts)
 
     async def forward_request(
         self,
@@ -196,6 +241,11 @@ class RouterRuntime:
         headers = self._prepare_outbound_headers(request.headers, client_host)
         method = request.method.upper()
 
+        metrics = self._metrics
+        start = perf_counter() if metrics else None
+        if metrics:
+            metrics.proxy_inflight_inc(method)
+
         try:
             resp = await self._proxy_client.request(
                 method,
@@ -205,7 +255,17 @@ class RouterRuntime:
                 timeout=self.config.request_timeout_s,
             )
         except httpx.RequestError as exc:
+            if metrics and start is not None:
+                metrics.record_proxy_attempt(method, "error", "exception", perf_counter() - start)
             raise ProxyError(str(exc)) from exc
+        else:
+            if metrics and start is not None:
+                status_code = str(resp.status_code)
+                outcome = "success" if resp.status_code < 500 else "error"
+                metrics.record_proxy_attempt(method, outcome, status_code, perf_counter() - start)
+        finally:
+            if metrics:
+                metrics.proxy_inflight_dec(method)
 
         return self._build_response(resp)
 
@@ -229,12 +289,24 @@ class RouterRuntime:
     async def _probe_worker(self, entry: WorkerEntry) -> None:
         assert self._health_client is not None
         target = urljoin(entry.url + "/", self.config.normalized_health_path().lstrip("/"))
+        metrics = self._metrics
+        start = perf_counter() if metrics else None
         try:
             resp = await self._health_client.get(target, timeout=self.config.probe_timeout_s)
             healthy = 200 <= resp.status_code < 500
         except httpx.RequestError as exc:
             healthy = False
             logger.debug(f"Health probe failed for {entry.url}: {exc}")
+
+        if metrics and start is not None:
+            duration = perf_counter() - start
+            result = "success" if healthy else "failure"
+            metrics.record_health_probe(
+                entry.url,
+                result,
+                duration,
+                success_timestamp=time.time() if healthy else None,
+            )
 
         if healthy:
             await self.record_success(entry.url)
@@ -349,8 +421,10 @@ def create_router_app(runtime: RouterRuntime) -> FastAPI:
         last_error: Optional[Exception] = None
         last_response: Optional[Response] = None
         client_host = request.client.host if request.client else None
+        metrics = runtime._metrics
+        attempt = 0
 
-        for _ in range(max(1, runtime.config.max_retries)):
+        for attempt in range(max(1, runtime.config.max_retries)):
             worker = await runtime.choose_worker(exclude=attempted)
             if not worker:
                 break
@@ -369,19 +443,28 @@ def create_router_app(runtime: RouterRuntime) -> FastAPI:
                         worker.url,
                         reason=f"upstream status {response.status_code}",
                     )
+                    if metrics and attempt + 1 < runtime.config.max_retries:
+                        metrics.record_retry(f"upstream_status_{response.status_code}")
                     continue
                 await runtime.record_success(worker.url)
                 return response
             except ProxyError as exc:
                 last_error = exc
                 await runtime.record_failure(worker.url, reason=str(exc))
+                if metrics and attempt + 1 < runtime.config.max_retries:
+                    metrics.record_retry("proxy_error")
                 continue
 
         detail = "No healthy workers available"
         if last_error:
             detail = f"Proxy attempts failed: {last_error}"
+            if metrics:
+                metrics.record_terminal_failure("proxy_error")
         elif last_response is not None:
             return last_response
+        else:
+            if metrics:
+                metrics.record_terminal_failure("no_healthy_workers")
         raise HTTPException(status_code=503, detail=detail)
 
     return app
