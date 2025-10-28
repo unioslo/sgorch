@@ -96,6 +96,7 @@ class SlurmConfig(BaseModel):
     log_dir: str
     env: dict[str, str] = {}
     sbatch_extra: list[str] = []
+    pre_commands: list[str] = []
 
 
 class BackendBase(BaseModel):

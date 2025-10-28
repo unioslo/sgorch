@@ -27,6 +27,7 @@ def render_sbatch_script(
     health_path: str = "/health",
     health_token_env: str = "WORKER_HEALTH_TOKEN",
     sbatch_extra: Optional[list[str]] = None,
+    pre_commands: Optional[list[str]] = None,
 ) -> str:
     """Render SLURM sbatch script template."""
 
@@ -94,8 +95,20 @@ def render_sbatch_script(
 
     script_lines.extend(launch_plan.setup_lines)
 
+    # Add user-defined pre-commands
+    if pre_commands:
+        script_lines.extend([
+            "",
+            "# User-defined pre-commands",
+        ])
+        for cmd in pre_commands:
+            script_lines.extend([
+                f"echo '[$(date \'+%Y-%m-%d %H:%M:%S\')] Running pre-command: {cmd}'",
+                cmd,
+            ])
+        script_lines.append("")
+
     script_lines.extend([
-        "",
         "# Get node hostname and IP",
         'HOSTNAME=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)',
         'IP=$(getent hosts "$HOSTNAME" | awk \'{print $1}\' | head -n1)',
