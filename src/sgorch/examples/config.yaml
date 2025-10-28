@@ -76,6 +76,11 @@ deployments:
         HF_HOME: "/cluster/home/jonalsa/.cache/huggingface"
         HUGGINGFACE_HUB_CACHE: "/cluster/home/jonalsa/.cache/huggingface"
       sbatch_extra: []        # free-form extras
+      pre_commands:           # commands to run before the main backend command
+        - "echo 'Setting up custom environment'"
+        - "module load cuda/12.1"
+        - "export CUSTOM_VAR=value"
+        - "mkdir -p /tmp/my-cache"
 
     health:
       path: "/health"

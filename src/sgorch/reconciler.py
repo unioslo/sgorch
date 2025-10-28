@@ -428,7 +428,8 @@ class Reconciler:
             env_vars=self.config.slurm.env,
             remote_port=remote_port,
             health_path=self.config.health.path,
-            sbatch_extra=self.config.slurm.sbatch_extra
+            sbatch_extra=self.config.slurm.sbatch_extra,
+            pre_commands=self.config.slurm.pre_commands
         )
         
         return SubmitSpec(
