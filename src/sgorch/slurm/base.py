@@ -58,3 +58,7 @@ class ISlurm(ABC):
     def list_jobs(self, name_prefix: str) -> list[JobInfo]:
         """List jobs with names starting with the given prefix."""
         pass
+
+
+class SlurmUnavailableError(RuntimeError):
+    """Raised when the SLURM control plane is temporarily unavailable."""

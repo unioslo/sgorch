@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from ..logging_setup import get_logger
-from .base import ISlurm, SubmitSpec, JobInfo
+from .base import ISlurm, SubmitSpec, JobInfo, SlurmUnavailableError
 from .parse import parse_squeue_output, parse_scontrol_output
 
 
@@ -16,6 +16,12 @@ class SlurmCliAdapter(ISlurm):
     
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
+    
+    def _check_slurm_unavailable(self, error_msg: str) -> None:
+        """Check if error message indicates Slurm is unavailable and raise SlurmUnavailableError if so."""
+        lowercase_error = error_msg.lower()
+        if "socket timed out" in lowercase_error or "communications connection failure" in lowercase_error:
+            raise SlurmUnavailableError(error_msg)
     
     def submit(self, spec: SubmitSpec) -> str:
         """Submit a job using sbatch command."""
@@ -65,6 +71,7 @@ class SlurmCliAdapter(ISlurm):
             if result.returncode != 0:
                 error_msg = f"sbatch failed: {result.stderr}"
                 logger.error(error_msg)
+                self._check_slurm_unavailable(error_msg)
                 raise RuntimeError(error_msg)
             
             # Parse job ID from output (e.g., "Submitted batch job 12345")
@@ -180,8 +187,10 @@ class SlurmCliAdapter(ISlurm):
             )
 
             if result.returncode != 0:
-                logger.error(f"squeue failed: {result.stderr} {result.stdout}")
-                return []
+                message = (result.stderr or result.stdout or "").strip() or "squeue failed"
+                logger.error(f"squeue failed: {message}")
+                self._check_slurm_unavailable(message)
+                raise SlurmUnavailableError(message)
 
             # Client-side filter by job name (3rd column, index 2)
             filtered_lines: list[str] = []
@@ -199,10 +208,10 @@ class SlurmCliAdapter(ISlurm):
 
         except subprocess.TimeoutExpired:
             logger.error("squeue command timed out")
-            return []
+            raise SlurmUnavailableError("squeue command timed out")
         except Exception as e:
             logger.error(f"Error listing jobs: {e}")
-            return []
+            raise SlurmUnavailableError(str(e))
     
     def _run_command(self, cmd: List[str]) -> subprocess.CompletedProcess:
         """Run a command and return the result."""
