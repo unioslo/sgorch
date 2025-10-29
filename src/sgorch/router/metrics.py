@@ -42,13 +42,13 @@ class RouterMetrics:
         self._proxy_requests = Counter(
             "sgorch_router_proxy_requests_total",
             "Total proxy attempts to upstream workers",
-            ["router", "method", "outcome", "status_code"],
+            ["router", "method", "outcome", "status_code", "worker"],
             registry=self.registry,
         )
         self._proxy_latency = Histogram(
             "sgorch_router_proxy_request_latency_seconds",
             "Latency of proxy attempts to upstream workers",
-            ["router", "method", "outcome"],
+            ["router", "method", "outcome", "worker"],
             registry=self.registry,
         )
         self._proxy_inflight = Gauge(
@@ -114,8 +114,8 @@ class RouterMetrics:
     def proxy_inflight_dec(self, method: str) -> None:
         self._proxy_inflight.labels(router=self.router_name, method=method).dec()
 
-    def record_proxy_attempt(self, method: str, outcome: str, status_code: str, duration: float) -> None:
-        labels = dict(router=self.router_name, method=method, outcome=outcome)
+    def record_proxy_attempt(self, method: str, outcome: str, status_code: str, duration: float, worker: str) -> None:
+        labels = dict(router=self.router_name, method=method, outcome=outcome, worker=worker)
         self._proxy_requests.labels(status_code=status_code, **labels).inc()
         self._proxy_latency.labels(**labels).observe(duration)
 

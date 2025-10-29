@@ -256,13 +256,13 @@ class RouterRuntime:
             )
         except httpx.RequestError as exc:
             if metrics and start is not None:
-                metrics.record_proxy_attempt(method, "error", "exception", perf_counter() - start)
+                metrics.record_proxy_attempt(method, "error", "exception", perf_counter() - start, worker_url)
             raise ProxyError(str(exc)) from exc
         else:
             if metrics and start is not None:
                 status_code = str(resp.status_code)
                 outcome = "success" if resp.status_code < 500 else "error"
-                metrics.record_proxy_attempt(method, outcome, status_code, perf_counter() - start)
+                metrics.record_proxy_attempt(method, outcome, status_code, perf_counter() - start, worker_url)
         finally:
             if metrics:
                 metrics.proxy_inflight_dec(method)
