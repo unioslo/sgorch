@@ -16,12 +16,7 @@ class SlurmCliAdapter(ISlurm):
     
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
-    
-    def _check_slurm_unavailable(self, error_msg: str) -> None:
-        """Check if error message indicates Slurm is unavailable and raise SlurmUnavailableError if so."""
-        lowercase_error = error_msg.lower()
-        if "socket timed out" in lowercase_error or "communications connection failure" in lowercase_error:
-            raise SlurmUnavailableError(error_msg)
+
     
     def submit(self, spec: SubmitSpec) -> str:
         """Submit a job using sbatch command."""
@@ -71,8 +66,7 @@ class SlurmCliAdapter(ISlurm):
             if result.returncode != 0:
                 error_msg = f"sbatch failed: {result.stderr}"
                 logger.error(error_msg)
-                self._check_slurm_unavailable(error_msg)
-                raise RuntimeError(error_msg)
+                raise SlurmUnavailableError(error_msg)
             
             # Parse job ID from output (e.g., "Submitted batch job 12345")
             output = result.stdout.strip()
@@ -189,8 +183,7 @@ class SlurmCliAdapter(ISlurm):
             if result.returncode != 0:
                 message = (result.stderr or result.stdout or "").strip() or "squeue failed"
                 logger.error(f"squeue failed: {message}")
-                self._check_slurm_unavailable(message)
-                raise RuntimeError(message)
+                raise SlurmUnavailableError(message)
 
             # Client-side filter by job name (3rd column, index 2)
             filtered_lines: list[str] = []
