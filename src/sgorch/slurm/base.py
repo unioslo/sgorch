@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Literal
 
+from .errors import SlurmUnavailableError
+
 JobState = Literal[
     "PENDING", "RUNNING", "COMPLETED", "FAILED", 
     "CANCELLED", "TIMEOUT", "NODE_FAIL", "UNKNOWN"
@@ -60,5 +62,10 @@ class ISlurm(ABC):
         pass
 
 
-class SlurmUnavailableError(RuntimeError):
-    """Raised when the SLURM control plane is temporarily unavailable."""
+__all__ = [
+    "JobState",
+    "SubmitSpec",
+    "JobInfo",
+    "ISlurm",
+    "SlurmUnavailableError",
+]
