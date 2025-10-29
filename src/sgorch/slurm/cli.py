@@ -1,10 +1,11 @@
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 from ..logging_setup import get_logger
 from .base import ISlurm, SubmitSpec, JobInfo, SlurmUnavailableError
+from .errors import raise_if_unavailable, SlurmOperation
 from .parse import parse_squeue_output, parse_scontrol_output
 
 
@@ -17,7 +18,10 @@ class SlurmCliAdapter(ISlurm):
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
 
-    
+    def _check_slurm_unavailable(self, message: str, *, operation: SlurmOperation) -> None:
+        """Raise SlurmUnavailableError when message matches outage patterns."""
+        raise_if_unavailable(message, operation=operation)
+
     def submit(self, spec: SubmitSpec) -> str:
         """Submit a job using sbatch command."""
         logger.info(f"Submitting job: {spec.name}")
@@ -56,17 +60,27 @@ class SlurmCliAdapter(ISlurm):
             cmd.append(script_path)
             
             # Execute sbatch
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout
-            )
-            
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout
+                )
+            except subprocess.TimeoutExpired:
+                logger.error("sbatch command timed out")
+                raise SlurmUnavailableError("sbatch command timed out")
+            except Exception as exc:
+                logger.error(f"sbatch command failed: {exc}")
+                message = str(exc)
+                self._check_slurm_unavailable(message, operation=SlurmOperation.SUBMIT)
+                raise
+
             if result.returncode != 0:
-                error_msg = f"sbatch failed: {result.stderr}"
-                logger.error(error_msg)
-                raise SlurmUnavailableError(error_msg)
+                raw_error = (result.stderr or result.stdout or "").strip() or "sbatch failed"
+                logger.error(f"sbatch failed: {raw_error}")
+                self._check_slurm_unavailable(raw_error, operation=SlurmOperation.SUBMIT)
+                raise RuntimeError(f"sbatch failed: {raw_error}")
             
             # Parse job ID from output (e.g., "Submitted batch job 12345")
             output = result.stdout.strip()
@@ -183,7 +197,8 @@ class SlurmCliAdapter(ISlurm):
             if result.returncode != 0:
                 message = (result.stderr or result.stdout or "").strip() or "squeue failed"
                 logger.error(f"squeue failed: {message}")
-                raise SlurmUnavailableError(message)
+                self._check_slurm_unavailable(message, operation=SlurmOperation.LIST)
+                raise RuntimeError(message)
 
             # Client-side filter by job name (3rd column, index 2)
             filtered_lines: list[str] = []
@@ -203,8 +218,10 @@ class SlurmCliAdapter(ISlurm):
             logger.error("squeue command timed out")
             raise SlurmUnavailableError("squeue command timed out")
         except Exception as e:
-            logger.error(f"Error listing jobs: {e}")
-            raise SlurmUnavailableError(str(e))
+            message = str(e)
+            logger.error(f"Error listing jobs: {message}")
+            self._check_slurm_unavailable(message, operation=SlurmOperation.LIST)
+            raise RuntimeError(message)
     
     def _run_command(self, cmd: List[str]) -> subprocess.CompletedProcess:
         """Run a command and return the result."""
