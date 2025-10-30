@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from .logging_setup import get_logger
 from .config import DeploymentConfig
-from .slurm.base import ISlurm, SubmitSpec
+from .slurm.base import ISlurm, SubmitSpec, SlurmUnavailableError
 from .slurm.sbatch_templates import render_sbatch_script
 from .router.client import RouterClient
 from .notify.base import Notifier
@@ -87,6 +87,10 @@ class Reconciler:
         
         # Load persisted state first, then adopt any existing workers
         self._load_persisted_state()
+
+        # SLURM availability tracking
+        self.slurm_unavailable_since: float | None = None
+        self.slurm_unavailable_reason: Optional[str] = None
 
         # Perform initial adoption
         self._adopt_existing_workers()
@@ -212,12 +216,35 @@ class Reconciler:
             
         except Exception as e:
             self.logger.error(f"Error in reconciliation cycle: {e}")
+
+    def _mark_slurm_unavailable(self, reason: str) -> None:
+        """Record that SLURM is unreachable and avoid thrashing."""
+        self.slurm_unavailable_reason = reason
+        if self.slurm_unavailable_since is None:
+            self.slurm_unavailable_since = time.time()
+            self.logger.warning(f"SLURM unavailable: {reason}")
+        else:
+            # Avoid spamming error logs while the outage persists
+            self.logger.debug("SLURM still unavailable", reason=reason)
+
+    def _mark_slurm_available(self) -> None:
+        """Clear outage state once SLURM responds again."""
+        if self.slurm_unavailable_since is not None:
+            downtime = time.time() - self.slurm_unavailable_since
+            self.logger.info(f"SLURM connectivity restored after {downtime:.1f}s")
+        self.slurm_unavailable_since = None
+        self.slurm_unavailable_reason = None
     
     def _update_worker_states(self) -> None:
         """Update worker states from SLURM."""
         # Get all our jobs from SLURM
         job_prefix = f"{self.backend.job_name_prefix}-{self.config.name}-"
-        slurm_jobs = self.slurm.list_jobs(job_prefix)
+        try:
+            slurm_jobs = self.slurm.list_jobs(job_prefix)
+            self._mark_slurm_available()
+        except SlurmUnavailableError as e:
+            self._mark_slurm_unavailable(str(e))
+            return
         
         # Update existing workers
         for worker in list(self.workers.values()):
@@ -301,6 +328,13 @@ class Reconciler:
         
         self.logger.debug(f"Reconciling: desired={desired}, healthy={current_healthy}, total={current_total}")
         
+        if self.slurm_unavailable_since is not None:
+            self.logger.debug(
+                "Skipping scale-up because SLURM is unavailable",
+                reason=self.slurm_unavailable_reason,
+            )
+            return
+
         # Start new workers if needed
         if current_total < desired:
             needed = desired - current_total
@@ -322,6 +356,13 @@ class Reconciler:
     
     def _start_worker(self) -> None:
         """Start a new worker."""
+        if self.slurm_unavailable_since is not None:
+            self.logger.debug(
+                "Skipping worker start while SLURM is unavailable",
+                reason=self.slurm_unavailable_reason,
+            )
+            return
+
         try:
             # Generate unique instance ID
             instance_uuid = str(uuid.uuid4())
@@ -338,7 +379,11 @@ class Reconciler:
             spec = self._create_job_spec(instance_idx, instance_uuid, remote_port)
             
             # Submit job
-            job_id = self.slurm.submit(spec)
+            try:
+                job_id = self.slurm.submit(spec)
+                self._mark_slurm_available()
+            except SlurmUnavailableError as e:
+                raise
             
             # Create worker state
             worker = WorkerState(
@@ -359,6 +404,13 @@ class Reconciler:
             self.logger.info(f"Monitor startup: tail -f {backend_log_path}")
             self.metrics.record_job_submitted(self.config.name)
             
+        except SlurmUnavailableError as e:
+            self._mark_slurm_unavailable(str(e))
+            self.logger.warning(f"Deferring worker start due to SLURM outage: {e}")
+            if 'remote_port' in locals():
+                self.port_allocator.release_port(remote_port)
+            if 'advertise_port' in locals() and advertise_port != remote_port:
+                self.port_allocator.release_port(advertise_port)
         except Exception as e:
             self.logger.error(f"Failed to start worker: {e}")
             # Release allocated ports on failure

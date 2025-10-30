@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Literal
 
+from .errors import SlurmUnavailableError
+
 JobState = Literal[
     "PENDING", "RUNNING", "COMPLETED", "FAILED", 
     "CANCELLED", "TIMEOUT", "NODE_FAIL", "UNKNOWN"
@@ -58,3 +60,12 @@ class ISlurm(ABC):
     def list_jobs(self, name_prefix: str) -> list[JobInfo]:
         """List jobs with names starting with the given prefix."""
         pass
+
+
+__all__ = [
+    "JobState",
+    "SubmitSpec",
+    "JobInfo",
+    "ISlurm",
+    "SlurmUnavailableError",
+]
