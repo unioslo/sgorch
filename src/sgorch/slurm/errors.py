@@ -142,7 +142,7 @@ def raise_if_unavailable(
             "SLURM outage detected",
             operation=operation.value,
             detail=detail,
-            message=snippet,
+            error_message=snippet,
         )
         composed = f"{detail}: {snippet}" if snippet else detail
         raise SlurmUnavailableError(composed)
