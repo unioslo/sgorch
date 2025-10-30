@@ -119,6 +119,16 @@ def detect_slurm_unavailability(
     return None
 
 
+def _summarize_message(message: Optional[str], limit: int = 160) -> str:
+    """Return a single-line snippet of the raw error message."""
+    if not message:
+        return ""
+    collapsed = " ".join(message.strip().split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return f"{collapsed[:limit-3]}..."
+
+
 def raise_if_unavailable(
     message: Optional[str],
     *,
@@ -127,6 +137,12 @@ def raise_if_unavailable(
     """Raise SlurmUnavailableError if the message indicates an outage."""
     detail = detect_slurm_unavailability(message, operation=operation)
     if detail:
-        text = message.strip() if message else ""
-        composed = f"{detail}: {text}" if text else detail
+        snippet = _summarize_message(message)
+        logger.warning(
+            "SLURM outage detected",
+            operation=operation.value,
+            detail=detail,
+            message=snippet,
+        )
+        composed = f"{detail}: {snippet}" if snippet else detail
         raise SlurmUnavailableError(composed)
